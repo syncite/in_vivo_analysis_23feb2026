@@ -8,22 +8,23 @@ function visualise_waveform(master_mat_file, varargin)
 % For each requested channel, this function:
 %   1) loads channel_<N>_filtered_CAR.mat
 %   2) loads spike times from times_channel_<N>_*.mat (wave_clus output)
-%   3) picks random LED trials where both units have >=1 spike in window
-%   4) plots two rows per trial:
-%      - top row: wider window
-%      - bottom row: zoomed window
-%      Each panel contains waveform (top) + raster strip just below it.
+%   3) makes one figure with trials where unit 2 spikes in first 10 ms
+%   4) makes one figure with trials where unit 2 does not spike in first 10 ms
+%   5) makes one overlay figure of unit 2 spike-aligned traces:
+%      early spikes (0-10 ms from LED) vs all other unit 2 spikes.
+%      Trial panels contain waveform (top) + raster strip (bottom).
 
     % Editable plot windows (ms): [start end]
-    top_window_ms = [-25 50];
-    bottom_window_ms = [25 35];
+    top_window_ms = [-100 100];
+    bottom_window_ms = [-3 10];
+    unit2_early_window_ms = [0 10];
+    spike_overlay_window_ms = [-1 2];
 
     p = inputParser;
     addOptional(p, 'master_mat_file', '', @ischar);
     addParameter(p, 'channels', [], @isnumeric);
     addParameter(p, 'n_trials', 3, @isnumeric);
     addParameter(p, 'window_ms', [], @(x) isempty(x) || isnumeric(x));
-    addParameter(p, 'timing_correction', 0.02295, @isnumeric);
     addParameter(p, 'led_tags', [32385 32297 32329 32321 32417], @isnumeric);
     addParameter(p, 'seed', [], @(x) isempty(x) || isnumeric(x));
     parse(p, master_mat_file, varargin{:});
@@ -47,7 +48,7 @@ function visualise_waveform(master_mat_file, varargin)
         'Eventstime', 'EventTag', 'nChannels', 'FsPlexon', ...
         'firstADsamples', 'firstADsample');
 
-    all_event_times = master.Eventstime(:)' + opts.timing_correction;
+    all_event_times = master.Eventstime(:)';
     all_event_tags = master.EventTag(:)';
 
     led_mask = ismember(all_event_tags, opts.led_tags);
@@ -133,95 +134,80 @@ function visualise_waveform(master_mat_file, varargin)
         n_units = numel(cluster_ids);
         if n_units < 2
             warning(['Channel %d: found %d unit(s). Need at least 2 units to ' ...
-                'select trials where both units spike. Skipping.'], ch, n_units);
+                'evaluate unit 2 trial groups. Skipping.'], ch, n_units);
             continue;
         end
 
-        % Use the first two sorted clusters as the required "both units".
-        required_units = 1:2;
-        eligible = false(1, numel(led_events));
+        unit2_idx = 2;
+        unit2_spikes = spike_by_unit{unit2_idx};
+        has_unit2_early = false(1, numel(led_events));
+        event_in_bounds = false(1, numel(led_events));
+
         for ei = 1:numel(led_events)
             t0 = led_events(ei);
 
             event_sample = round((t0 - first_sample_s) * Fs) + 1;
             idx_top = event_sample + sample_offsets_top;
-            if idx_top(1) < 1 || idx_top(end) > numel(trace)
-                continue;
-            end
+            idx_bottom = event_sample + sample_offsets_bottom;
+            event_in_bounds(ei) = idx_top(1) >= 1 && idx_top(end) <= numel(trace) && ...
+                                  idx_bottom(1) >= 1 && idx_bottom(end) <= numel(trace);
 
-            both_units_spike = true;
-            for ui = required_units
-                rel_ms = (spike_by_unit{ui} - t0) * 1000;
-                in_win = rel_ms >= top_window_ms(1) & rel_ms <= top_window_ms(2);
-                if ~any(in_win)
-                    both_units_spike = false;
-                    break;
-                end
-            end
-            eligible(ei) = both_units_spike;
+            rel2_ms = (unit2_spikes - t0) * 1000;
+            has_unit2_early(ei) = any(rel2_ms >= unit2_early_window_ms(1) & ...
+                                      rel2_ms <= unit2_early_window_ms(2));
         end
 
-        eligible_idx = find(eligible);
-        if isempty(eligible_idx)
-            warning(['Channel %d: no LED trials where both required units have ' ...
-                'spikes in %.1f to %.1f ms. Skipping.'], ...
-                ch, top_window_ms(1), top_window_ms(2));
+        group_hit = find(event_in_bounds & has_unit2_early);
+        group_miss = find(event_in_bounds & ~has_unit2_early);
+
+        if isempty(group_hit) && isempty(group_miss)
+            warning(['Channel %d: no LED trials in-bounds for requested windows ' ...
+                '(top %.1f to %.1f ms, bottom %.1f to %.1f ms). Skipping.'], ...
+                ch, top_window_ms(1), top_window_ms(2), ...
+                bottom_window_ms(1), bottom_window_ms(2));
             continue;
         end
 
-        n_trials = min(max(1, round(opts.n_trials)), numel(eligible_idx));
-        if numel(eligible_idx) < round(opts.n_trials)
-            warning('Channel %d: only %d qualifying trials found (requested %d).', ...
-                ch, numel(eligible_idx), round(opts.n_trials));
-        end
-        chosen = eligible_idx(randperm(numel(eligible_idx), n_trials));
-        trial_times = led_events(chosen);
-        trial_ids = led_event_idx(chosen);
-
-        seg_top = nan(n_trials, numel(sample_offsets_top));
-        seg_bottom = nan(n_trials, numel(sample_offsets_bottom));
-        valid_top = false(1, n_trials);
-        valid_bottom = false(1, n_trials);
-        for ti = 1:n_trials
-            event_sample = round((trial_times(ti) - first_sample_s) * Fs) + 1;
-
-            idx_top = event_sample + sample_offsets_top;
-            if idx_top(1) >= 1 && idx_top(end) <= numel(trace)
-                seg_top(ti, :) = trace(idx_top);
-                valid_top(ti) = true;
-            end
-
-            idx_bottom = event_sample + sample_offsets_bottom;
-            if idx_bottom(1) >= 1 && idx_bottom(end) <= numel(trace)
-                seg_bottom(ti, :) = trace(idx_bottom);
-                valid_bottom(ti) = true;
-            end
-        end
-
-        fig = figure('Color', 'w', 'Position', [80 120 1500 820]);
-        tiled = tiledlayout(2, n_trials, 'TileSpacing', 'compact', 'Padding', 'compact');
-        title(tiled, sprintf(['Channel %d | %d random LED trials | top %.1f to %.1f ms | ' ...
-            'bottom %.1f to %.1f ms'], ...
-            ch, n_trials, top_window_ms(1), top_window_ms(2), ...
-            bottom_window_ms(1), bottom_window_ms(2)));
         unit_colors = lines(max(n_units, 1));
 
-        for ti = 1:n_trials
-            host_top = nexttile(tiled, ti);
-            plot_wave_raster_tile(host_top, t_top_ms, seg_top(ti, :), valid_top(ti), ...
-                trial_times(ti), cluster_ids, spike_by_unit, unit_colors, ...
-                top_window_ms, sprintf('LED trial #%d', trial_ids(ti)), ...
-                ti == 1, false);
-
-            host_bottom = nexttile(tiled, n_trials + ti);
-            plot_wave_raster_tile(host_bottom, t_bottom_ms, seg_bottom(ti, :), ...
-                valid_bottom(ti), trial_times(ti), cluster_ids, spike_by_unit, ...
-                unit_colors, bottom_window_ms, ...
-                sprintf('LED trial #%d (zoom)', trial_ids(ti)), ...
-                ti == 1, true);
+        n_req = max(1, round(opts.n_trials));
+        if isempty(group_hit)
+            warning('Channel %d: no trials where unit 2 spikes in first %.1f ms.', ...
+                ch, unit2_early_window_ms(2));
+        else
+            if numel(group_hit) < n_req
+                warning('Channel %d: only %d unit2-early trials found (requested %d).', ...
+                    ch, numel(group_hit), n_req);
+            end
+            chosen_hit = group_hit(randperm(numel(group_hit), min(n_req, numel(group_hit))));
+            plot_trial_group_figure(ch, 'Unit 2 spike in first 10 ms', ...
+                led_events(chosen_hit), led_event_idx(chosen_hit), ...
+                trace, first_sample_s, Fs, ...
+                sample_offsets_top, sample_offsets_bottom, ...
+                t_top_ms, t_bottom_ms, cluster_ids, spike_by_unit, unit_colors, ...
+                top_window_ms, bottom_window_ms);
         end
 
-        set(fig, 'Name', sprintf('visualise_waveform_ch%d', ch));
+        if isempty(group_miss)
+            warning('Channel %d: no trials where unit 2 is silent in first %.1f ms.', ...
+                ch, unit2_early_window_ms(2));
+        else
+            if numel(group_miss) < n_req
+                warning('Channel %d: only %d unit2-no-early trials found (requested %d).', ...
+                    ch, numel(group_miss), n_req);
+            end
+            chosen_miss = group_miss(randperm(numel(group_miss), min(n_req, numel(group_miss))));
+            plot_trial_group_figure(ch, 'Unit 2 no spike in first 10 ms', ...
+                led_events(chosen_miss), led_event_idx(chosen_miss), ...
+                trace, first_sample_s, Fs, ...
+                sample_offsets_top, sample_offsets_bottom, ...
+                t_top_ms, t_bottom_ms, cluster_ids, spike_by_unit, unit_colors, ...
+                top_window_ms, bottom_window_ms);
+        end
+
+        plot_unit2_overlay_figure(ch, unit2_spikes, led_events, ...
+            unit2_early_window_ms, spike_overlay_window_ms, ...
+            trace, first_sample_s, Fs);
     end
 end
 
@@ -307,6 +293,147 @@ function plot_wave_raster_tile(host_ax, t_ms, seg, is_valid, trial_time_s, ...
     else
         set(ax_raster, 'XTickLabel', []);
     end
+end
+
+function plot_trial_group_figure(ch, group_label, trial_times, trial_ids, ...
+    trace, first_sample_s, Fs, sample_offsets_top, sample_offsets_bottom, ...
+    t_top_ms, t_bottom_ms, cluster_ids, spike_by_unit, unit_colors, ...
+    top_window_ms, bottom_window_ms)
+
+    n_trials = numel(trial_times);
+    [seg_top, valid_top] = extract_event_segments(trace, first_sample_s, Fs, ...
+        trial_times, sample_offsets_top);
+    [seg_bottom, valid_bottom] = extract_event_segments(trace, first_sample_s, Fs, ...
+        trial_times, sample_offsets_bottom);
+
+    fig = figure('Color', 'w', 'Position', [80 120 1500 820]);
+    tiled = tiledlayout(2, n_trials, 'TileSpacing', 'compact', 'Padding', 'compact');
+    title(tiled, sprintf(['Channel %d | %s | %d random trials | ' ...
+        'top %.1f to %.1f ms | bottom %.1f to %.1f ms'], ...
+        ch, group_label, n_trials, ...
+        top_window_ms(1), top_window_ms(2), ...
+        bottom_window_ms(1), bottom_window_ms(2)));
+
+    for ti = 1:n_trials
+        host_top = nexttile(tiled, ti);
+        plot_wave_raster_tile(host_top, t_top_ms, seg_top(ti, :), valid_top(ti), ...
+            trial_times(ti), cluster_ids, spike_by_unit, unit_colors, ...
+            top_window_ms, sprintf('LED trial #%d', trial_ids(ti)), ...
+            ti == 1, true);
+
+        host_bottom = nexttile(tiled, n_trials + ti);
+        plot_wave_raster_tile(host_bottom, t_bottom_ms, seg_bottom(ti, :), ...
+            valid_bottom(ti), trial_times(ti), cluster_ids, spike_by_unit, ...
+            unit_colors, bottom_window_ms, ...
+            sprintf('LED trial #%d (zoom)', trial_ids(ti)), ...
+            ti == 1, true);
+    end
+
+    set(fig, 'Name', sprintf('visualise_waveform_ch%d_%s', ...
+        ch, regexprep(lower(group_label), '[^a-z0-9]+', '_')));
+end
+
+function plot_unit2_overlay_figure(ch, unit2_spikes, led_events, ...
+    early_window_ms, overlay_window_ms, trace, first_sample_s, Fs)
+
+    early_mask = spike_mask_in_windows(unit2_spikes, led_events, early_window_ms / 1000);
+    spikes_early = unit2_spikes(early_mask);
+    spikes_other = unit2_spikes(~early_mask);
+
+    sample_offsets_overlay = round((overlay_window_ms(1) / 1000) * Fs) : ...
+                             round((overlay_window_ms(2) / 1000) * Fs);
+    t_overlay_ms = sample_offsets_overlay / Fs * 1000;
+
+    snippets_early = extract_spike_snippets(trace, spikes_early, ...
+        first_sample_s, Fs, sample_offsets_overlay);
+    snippets_other = extract_spike_snippets(trace, spikes_other, ...
+        first_sample_s, Fs, sample_offsets_overlay);
+
+    fig = figure('Color', 'w', 'Position', [120 170 920 520]);
+    ax = axes('Parent', fig);
+    hold(ax, 'on');
+
+    col_early = [0.86 0.20 0.20];
+    col_other = [0.15 0.45 0.85];
+    line_col_early = blend_with_white(col_early, 0.30);
+    line_col_other = blend_with_white(col_other, 0.30);
+
+    for si = 1:size(snippets_other, 1)
+        plot(ax, t_overlay_ms, snippets_other(si, :), 'Color', line_col_other, ...
+            'LineWidth', 0.8);
+    end
+    for si = 1:size(snippets_early, 1)
+        plot(ax, t_overlay_ms, snippets_early(si, :), 'Color', line_col_early, ...
+            'LineWidth', 0.8);
+    end
+
+    if ~isempty(snippets_other)
+        plot(ax, t_overlay_ms, mean(snippets_other, 1), 'Color', col_other, 'LineWidth', 2);
+    end
+    if ~isempty(snippets_early)
+        plot(ax, t_overlay_ms, mean(snippets_early, 1), 'Color', col_early, 'LineWidth', 2);
+    end
+
+    h_other = plot(ax, nan, nan, 'Color', col_other, 'LineWidth', 2);
+    h_early = plot(ax, nan, nan, 'Color', col_early, 'LineWidth', 2);
+
+    xline(ax, 0, '--', 'Color', [0.1 0.1 0.1], 'LineWidth', 1);
+    xlim(ax, overlay_window_ms);
+    xlabel(ax, 'Time from Unit 2 spike (ms)');
+    ylabel(ax, 'Filtered signal');
+    grid(ax, 'on');
+    box(ax, 'on');
+    title(ax, sprintf(['Channel %d | Unit 2 spike overlays | early 0-10 ms from LED: n=%d | ' ...
+        'other: n=%d'], ch, size(snippets_early, 1), size(snippets_other, 1)));
+    legend(ax, [h_other h_early], ...
+        {sprintf('Other unit 2 spikes (n=%d)', size(snippets_other, 1)), ...
+        sprintf('Early unit 2 spikes (n=%d)', size(snippets_early, 1))}, ...
+        'Location', 'best');
+    set(fig, 'Name', sprintf('visualise_waveform_ch%d_unit2_overlay', ch));
+end
+
+function [segments, valid] = extract_event_segments(trace, first_sample_s, Fs, ...
+    event_times_s, sample_offsets)
+
+    n_evt = numel(event_times_s);
+    segments = nan(n_evt, numel(sample_offsets));
+    valid = false(1, n_evt);
+
+    for ei = 1:n_evt
+        event_sample = round((event_times_s(ei) - first_sample_s) * Fs) + 1;
+        idx = event_sample + sample_offsets;
+        if idx(1) >= 1 && idx(end) <= numel(trace)
+            segments(ei, :) = trace(idx);
+            valid(ei) = true;
+        end
+    end
+end
+
+function snippets = extract_spike_snippets(trace, spike_times_s, first_sample_s, Fs, sample_offsets)
+    snippets = zeros(0, numel(sample_offsets));
+    for si = 1:numel(spike_times_s)
+        spike_sample = round((spike_times_s(si) - first_sample_s) * Fs) + 1;
+        idx = spike_sample + sample_offsets;
+        if idx(1) >= 1 && idx(end) <= numel(trace)
+            snippets(end+1, :) = trace(idx); %#ok<AGROW>
+        end
+    end
+end
+
+function mask = spike_mask_in_windows(spike_s, event_times_s, win_s)
+    mask = false(size(spike_s));
+    if isempty(spike_s) || isempty(event_times_s)
+        return;
+    end
+
+    for ei = 1:numel(event_times_s)
+        t0 = event_times_s(ei);
+        mask = mask | (spike_s >= t0 + win_s(1) & spike_s <= t0 + win_s(2));
+    end
+end
+
+function col = blend_with_white(base_col, alpha_val)
+    col = alpha_val * base_col + (1 - alpha_val) * [1 1 1];
 end
 
 function f = pick_first_existing(candidates)
