@@ -502,26 +502,53 @@ function analyse_peri_event(master_mat_file, varargin)
         ylim([0 ttp_axis_max*1.3 + 0.2]);
         grid on; box on;
 
-        % --- Panel C: raster for primary tag (bigger dots) ---
-        ax_rr = subplot(2, 2, 3);
-        hold on;
+        % --- Panel C: main raster + narrow onset zoom raster ---
+        ax_rr_slot = subplot(2, 2, 3);
+        rr_pos = get(ax_rr_slot, 'Position');
+        delete(ax_rr_slot);
 
+        main_w_frac = 0.74;
+        gap_w_frac = 0.04;
+        zoom_w_frac = 0.22;
+        main_pos = [rr_pos(1), rr_pos(2), rr_pos(3)*main_w_frac, rr_pos(4)];
+        zoom_pos = [rr_pos(1) + rr_pos(3)*(main_w_frac + gap_w_frac), ...
+                    rr_pos(2), rr_pos(3)*zoom_w_frac, rr_pos(4)];
+
+        ax_rr = axes('Position', main_pos);
+        hold(ax_rr, 'on');
+        ax_rr_zoom = axes('Position', zoom_pos);
+        hold(ax_rr_zoom, 'on');
+
+        zoom_window = [-0.01 0.05];  % -10 to +50 ms
         spk = units(ui).spike_times_s;
         for trial_i = 1:n_primary
             t0 = primary_events(trial_i);
-            rel = spk(spk >= t0 + opts.window(1) & spk < t0 + opts.window(2)) - t0;
-            if ~isempty(rel)
-                scatter(rel, repmat(trial_i, numel(rel), 1), 10, ...
+            rel_main = spk(spk >= t0 + opts.window(1) & spk < t0 + opts.window(2)) - t0;
+            rel_zoom = spk(spk >= t0 + zoom_window(1) & spk < t0 + zoom_window(2)) - t0;
+
+            if ~isempty(rel_main)
+                scatter(ax_rr, rel_main, repmat(trial_i, numel(rel_main), 1), 10, ...
+                    get_unit_color(ui), 'filled', 'MarkerFaceAlpha', 0.7);
+            end
+            if ~isempty(rel_zoom)
+                scatter(ax_rr_zoom, rel_zoom, repmat(trial_i, numel(rel_zoom), 1), 10, ...
                     get_unit_color(ui), 'filled', 'MarkerFaceAlpha', 0.7);
             end
         end
 
-        xlim(opts.window);
-        ylim([0 n_primary + 1]);
-        set(gca, 'YDir', 'reverse');
-        xlabel('Time from event onset (s)');
-        ylabel('Trial');
-        title(sprintf('Raster — %s (%d trials)', primary_label, n_primary), 'FontSize', 10);
+        xlim(ax_rr, opts.window);
+        ylim(ax_rr, [0 n_primary + 1]);
+        set(ax_rr, 'YDir', 'reverse');
+        xlabel(ax_rr, 'Time from event onset (s)');
+        ylabel(ax_rr, 'Trial');
+        title(ax_rr, sprintf('Raster — %s (%d trials)', primary_label, n_primary), ...
+            'FontSize', 10);
+
+        xlim(ax_rr_zoom, zoom_window);
+        ylim(ax_rr_zoom, [0 n_primary + 1]);
+        set(ax_rr_zoom, 'YDir', 'reverse', 'YTick', []);
+        xlabel(ax_rr_zoom, 'Time (s)');
+        title(ax_rr_zoom, '-10 to +50 ms', 'FontSize', 9);
 
         % --- Panel D/E: split lower-right quadrant (z-score + 5V rate) ---
         ax_slot = subplot(2, 2, 4);
