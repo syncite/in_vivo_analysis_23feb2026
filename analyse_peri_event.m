@@ -54,7 +54,7 @@ function analyse_peri_event(master_mat_file, varargin)
     end
 
     master = load(opts.master_mat_file, 'Eventstime', 'EventTag', ...
-        'nChannels', 'FsPlexon');
+        'nChannels', 'FsPlexon', 'firstADsamples', 'firstADsample');
 
     Fs = master.FsPlexon;
     all_event_times = master.Eventstime(:)' - opts.timing_correction;
@@ -134,6 +134,11 @@ function analyse_peri_event(master_mat_file, varargin)
         cc = wc.cluster_class;
         has_waveforms = isfield(wc, 'spikes');
         cluster_ids = unique(cc(:,1));
+        first_sample_s = get_first_sample_seconds(master, ch);
+        cc_times_s = cc(:, 2)' / 1000;
+        [cc_times_s, ref_mode] = normalize_spike_time_reference( ...
+            cc_times_s, first_sample_s, all_event_times);
+        fprintf('    Spike time reference: %s\n', ref_mode);
 
         for cid = cluster_ids(:)'
             if cid == 0, continue; end
@@ -147,7 +152,7 @@ function analyse_peri_event(master_mat_file, varargin)
                 continue;
             end
 
-            spike_s_raw = cc(mask, 2) / 1000;
+            spike_s_raw = cc_times_s(mask);
             [spike_s, sort_idx] = sort(spike_s_raw);
 
             units(end+1).label = sprintf('Ch%d Cl%d (n=%d)', ch, cid, n_spikes);
@@ -682,6 +687,61 @@ function analyse_peri_event(master_mat_file, varargin)
     end
 
     fprintf('\nAll figures saved to: %s\n', outDir);
+end
+
+function first_sample_s = get_first_sample_seconds(master, ch)
+    first_sample_s = 0;
+
+    if isfield(master, 'firstADsamples')
+        vals = double(master.firstADsamples(:));
+    elseif isfield(master, 'firstADsample')
+        vals = double(master.firstADsample(:));
+    else
+        return;
+    end
+
+    if ch >= 1 && ch <= numel(vals)
+        first_sample_s = vals(ch);
+    end
+end
+
+function [spike_s, mode] = normalize_spike_time_reference(spike_s_raw, first_sample_s, event_s)
+    spike_rel = double(spike_s_raw(:)');
+    spike_abs = spike_rel + first_sample_s;
+
+    if isempty(spike_rel) || isempty(event_s) || abs(first_sample_s) < eps
+        spike_s = spike_rel;
+        mode = 'as-is';
+        return;
+    end
+
+    lo = min(event_s) - 2;
+    hi = max(event_s) + 2;
+    frac_rel = mean(spike_rel >= lo & spike_rel <= hi);
+    frac_abs = mean(spike_abs >= lo & spike_abs <= hi);
+
+    if frac_abs > frac_rel + 0.05
+        spike_s = spike_abs;
+        mode = 'offset+firstAD';
+        return;
+    end
+    if frac_rel > frac_abs + 0.05
+        spike_s = spike_rel;
+        mode = 'as-is';
+        return;
+    end
+
+    med_ev = median(event_s);
+    score_rel = abs(median(spike_rel) - med_ev);
+    score_abs = abs(median(spike_abs) - med_ev);
+
+    if score_abs < score_rel
+        spike_s = spike_abs;
+        mode = 'offset+firstAD';
+    else
+        spike_s = spike_rel;
+        mode = 'as-is';
+    end
 end
 
 %% ================================================================
