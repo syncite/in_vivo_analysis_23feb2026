@@ -9,7 +9,8 @@ function analyse_peri_event(master_mat_file, varargin)
 %   1. Population summary per event tag (rasters, PSTHs, heatmap)
 %   2. Waveform classification scatter (half-width vs trough-to-peak time)
 %   3. Per-unit figure (waveform, scatter position, raster, z-score + 5V rate)
-%   4. Per-unit LED waveform comparison (pre-LED vs early-LED)
+%   4. All-unit overlay onset raster (primary tag, -10 to +20 ms)
+%   5. Per-unit LED waveform comparison (pre-LED vs early-LED)
 %
 % Parameters:
 %   'channels'           — channel indices [default: all]
@@ -247,51 +248,48 @@ function analyse_peri_event(master_mat_file, varargin)
         text(0.25*x_lim(2), 0.25*y_lim(2), 'Putative FS/Interneuron', 'FontSize', 11, ...
             'HorizontalAlignment', 'center', 'Color', [0.4 0.4 0.4]);
 
-        % Insets: overlaid mean waveforms for each class
+        % Inset (top-left): overlaid mean waveforms for both classes
         pyr_idx = find(is_pyramidal);
         fs_idx = find(valid_shape & ~is_pyramidal);
 
-        ax_inset_pyr = axes('Position', [0.60 0.62 0.33 0.26], 'Parent', fig_class); %#ok<LAXES>
-        hold(ax_inset_pyr, 'on');
+        ax_inset = axes('Position', [0.12 0.58 0.36 0.32], 'Parent', fig_class); %#ok<LAXES>
+        hold(ax_inset, 'on');
         n_pyr_wf = 0;
         for pi = pyr_idx
             if isempty(units(pi).avg_waveform), continue; end
             wf = units(pi).avg_waveform;
             t_ms = (0:numel(wf)-1) / Fs * 1000;
-            plot(ax_inset_pyr, t_ms, wf, 'k', 'LineWidth', 1.0);
+            plot(ax_inset, t_ms, wf, 'k', 'LineWidth', 1.0);
             n_pyr_wf = n_pyr_wf + 1;
         end
-        if n_pyr_wf == 0
-            text(ax_inset_pyr, 0.5, 0.5, 'No pyramidal waveforms', ...
-                'Units', 'normalized', 'HorizontalAlignment', 'center', ...
-                'FontSize', 8, 'Color', [0.3 0.3 0.3]);
-        end
-        title(ax_inset_pyr, sprintf('Pyramidal means (n=%d)', n_pyr_wf), 'FontSize', 9);
-        xlabel(ax_inset_pyr, 'ms', 'FontSize', 8);
-        ylabel(ax_inset_pyr, 'mV', 'FontSize', 8);
-        set(ax_inset_pyr, 'FontSize', 7);
-        box(ax_inset_pyr, 'on');
-
-        ax_inset_fs = axes('Position', [0.60 0.28 0.33 0.26], 'Parent', fig_class); %#ok<LAXES>
-        hold(ax_inset_fs, 'on');
         n_fs_wf = 0;
         for fi = fs_idx
             if isempty(units(fi).avg_waveform), continue; end
             wf = units(fi).avg_waveform;
             t_ms = (0:numel(wf)-1) / Fs * 1000;
-            plot(ax_inset_fs, t_ms, wf, 'Color', [0.85 0.1 0.1], 'LineWidth', 1.0);
+            plot(ax_inset, t_ms, wf, 'Color', [0.85 0.1 0.1], 'LineWidth', 1.0);
             n_fs_wf = n_fs_wf + 1;
         end
-        if n_fs_wf == 0
-            text(ax_inset_fs, 0.5, 0.5, 'No FS waveforms', ...
+
+        if n_pyr_wf == 0 && n_fs_wf == 0
+            text(ax_inset, 0.5, 0.5, 'No waveforms in either class', ...
                 'Units', 'normalized', 'HorizontalAlignment', 'center', ...
                 'FontSize', 8, 'Color', [0.3 0.3 0.3]);
         end
-        title(ax_inset_fs, sprintf('FS means (n=%d)', n_fs_wf), 'FontSize', 9);
-        xlabel(ax_inset_fs, 'ms', 'FontSize', 8);
-        ylabel(ax_inset_fs, 'mV', 'FontSize', 8);
-        set(ax_inset_fs, 'FontSize', 7);
-        box(ax_inset_fs, 'on');
+        title(ax_inset, sprintf('Mean waveforms: Pyr n=%d, FS n=%d', n_pyr_wf, n_fs_wf), ...
+            'FontSize', 9);
+        xlabel(ax_inset, 'ms', 'FontSize', 8);
+        ylabel(ax_inset, 'mV', 'FontSize', 8);
+        set(ax_inset, 'FontSize', 7);
+        if isprop(ax_inset.YAxis, 'Exponent')
+            ax_inset.YAxis.Exponent = 0;
+        end
+        ytickformat(ax_inset, '%.3f');
+        h_pyr_leg = plot(ax_inset, nan, nan, 'k', 'LineWidth', 1.2);
+        h_fs_leg = plot(ax_inset, nan, nan, 'Color', [0.85 0.1 0.1], 'LineWidth', 1.2);
+        legend(ax_inset, [h_pyr_leg, h_fs_leg], {'Pyramidal', 'FS'}, ...
+            'Location', 'northeast', 'FontSize', 7, 'Box', 'off');
+        box(ax_inset, 'on');
 
         figFile = fullfile(outDir, 'waveform_classification.png');
         saveas(fig_class, figFile);
@@ -516,7 +514,7 @@ function analyse_peri_event(master_mat_file, varargin)
         ax_rr_zoom = axes('Position', zoom_pos);
         hold(ax_rr_zoom, 'on');
 
-        zoom_window = [-0.01 0.05];  % -10 to +50 ms
+        zoom_window = [-0.01 0.02];  % -10 to +20 ms
         spk = units(ui).spike_times_s;
         for trial_i = 1:n_primary
             t0 = primary_events(trial_i);
@@ -545,7 +543,7 @@ function analyse_peri_event(master_mat_file, varargin)
         ylim(ax_rr_zoom, [0 n_primary + 1]);
         set(ax_rr_zoom, 'YDir', 'reverse', 'YTick', []);
         xlabel(ax_rr_zoom, 'Time (s)');
-        title(ax_rr_zoom, '-10 to +50 ms', 'FontSize', 9);
+        title(ax_rr_zoom, '-10 to +20 ms', 'FontSize', 9);
 
         % --- Panel D/E: split lower-right quadrant (z-score + 5V rate) ---
         ax_slot = subplot(2, 2, 4);
@@ -610,7 +608,7 @@ function analyse_peri_event(master_mat_file, varargin)
             end
 
             mean_rate_5v = mean(trial_rates_5v, 1);
-            unit_max_rate = max(trial_rates_5v(:));
+            unit_max_rate = max(mean_rate_5v);
 
             plot(ax_fr, psth_centers, mean_rate_5v, 'Color', get_unit_color(ui), ...
                 'LineWidth', 1.6);
@@ -624,7 +622,7 @@ function analyse_peri_event(master_mat_file, varargin)
 
         xlabel(ax_fr, 'Time from event onset (s)');
         ylabel(ax_fr, 'Firing rate (Hz)');
-        title(ax_fr, sprintf('5V firing rate (mean; unit peak y-max, n=%d)', numel(fiveV_events)), ...
+        title(ax_fr, sprintf('5V firing rate (mean, n=%d)', numel(fiveV_events)), ...
             'FontSize', 9);
         grid(ax_fr, 'on');
         box(ax_fr, 'on');
@@ -640,7 +638,46 @@ function analyse_peri_event(master_mat_file, varargin)
     end
 
     %% ================================================================
-    %  FIGURE 4: Per-unit waveform overlay around LED onset
+    %  FIGURE 4: All-unit overlay onset raster (-10 to +20 ms, primary tag)
+    %  ================================================================
+    if n_primary > 0
+        fig_all = figure('Position', [60 60 1700 900], 'Color', 'w', 'Visible', 'off');
+        ax_all = axes('Parent', fig_all);
+        hold(ax_all, 'on');
+
+        zoom_overlay_window = [-0.01 0.02];
+        for ui = 1:n_units
+            spk = units(ui).spike_times_s;
+            for trial_i = 1:n_primary
+                t0 = primary_events(trial_i);
+                rel = spk(spk >= t0 + zoom_overlay_window(1) & ...
+                          spk < t0 + zoom_overlay_window(2)) - t0;
+                if ~isempty(rel)
+                    scatter(ax_all, rel, repmat(trial_i, numel(rel), 1), 28, ...
+                        'Marker', 'o', 'MarkerEdgeColor', get_unit_color(ui), ...
+                        'MarkerFaceColor', 'none', 'LineWidth', 0.8);
+                end
+            end
+        end
+        xlim(ax_all, zoom_overlay_window);
+        ylim(ax_all, [0 n_primary + 1]);
+        set(ax_all, 'YDir', 'reverse');
+        xlabel(ax_all, 'Time from event onset (s)');
+        ylabel(ax_all, 'Trial');
+        title(ax_all, sprintf('All-unit overlay raster — %s (%d trials, -10 to +20 ms)', ...
+            primary_label, n_primary), 'FontSize', 12);
+        box(ax_all, 'on');
+        grid(ax_all, 'on');
+
+        figFile = fullfile(outDir, sprintf('all_units_overlay_%s_tag%d.png', ...
+            strrep(primary_label, ' ', '_'), opts.primary_tag));
+        saveas(fig_all, figFile);
+        fprintf('Saved: %s\n', figFile);
+        close(fig_all);
+    end
+
+    %% ================================================================
+    %  FIGURE 5: Per-unit waveform overlay around LED onset
     %  ================================================================
     waveDir = fullfile(outDir, 'waveform_led_comparison');
     if ~exist(waveDir, 'dir'), mkdir(waveDir); end

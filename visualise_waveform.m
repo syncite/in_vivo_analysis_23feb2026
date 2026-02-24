@@ -171,6 +171,9 @@ function visualise_waveform(master_mat_file, varargin)
         unit_colors = lines(max(n_units, 1));
 
         n_req = max(1, round(opts.n_trials));
+        chosen_hit = [];
+        chosen_miss = [];
+
         if isempty(group_hit)
             warning('Channel %d: no trials where unit 2 spikes in first %.1f ms.', ...
                 ch, unit2_early_window_ms(2));
@@ -180,12 +183,6 @@ function visualise_waveform(master_mat_file, varargin)
                     ch, numel(group_hit), n_req);
             end
             chosen_hit = group_hit(randperm(numel(group_hit), min(n_req, numel(group_hit))));
-            plot_trial_group_figure(ch, 'Unit 2 spike in first 10 ms', ...
-                led_events(chosen_hit), led_event_idx(chosen_hit), ...
-                trace, first_sample_s, Fs, ...
-                sample_offsets_top, sample_offsets_bottom, ...
-                t_top_ms, t_bottom_ms, cluster_ids, spike_by_unit, unit_colors, ...
-                top_window_ms, bottom_window_ms);
         end
 
         if isempty(group_miss)
@@ -197,12 +194,37 @@ function visualise_waveform(master_mat_file, varargin)
                     ch, numel(group_miss), n_req);
             end
             chosen_miss = group_miss(randperm(numel(group_miss), min(n_req, numel(group_miss))));
+        end
+
+        shared_top_ylim = [];
+        shared_bottom_ylim = [];
+        chosen_all = [chosen_hit(:)' chosen_miss(:)'];
+        if ~isempty(chosen_all)
+            [seg_top_all, valid_top_all] = extract_event_segments(trace, first_sample_s, Fs, ...
+                led_events(chosen_all), sample_offsets_top);
+            [seg_bottom_all, valid_bottom_all] = extract_event_segments(trace, first_sample_s, Fs, ...
+                led_events(chosen_all), sample_offsets_bottom);
+            shared_top_ylim = compute_shared_ylim(seg_top_all, valid_top_all);
+            shared_bottom_ylim = compute_shared_ylim(seg_bottom_all, valid_bottom_all);
+        end
+
+        if ~isempty(chosen_hit)
+            plot_trial_group_figure(ch, 'Unit 2 spike in first 10 ms', ...
+                led_events(chosen_hit), led_event_idx(chosen_hit), ...
+                trace, first_sample_s, Fs, ...
+                sample_offsets_top, sample_offsets_bottom, ...
+                t_top_ms, t_bottom_ms, cluster_ids, spike_by_unit, unit_colors, ...
+                top_window_ms, bottom_window_ms, ...
+                shared_top_ylim, shared_bottom_ylim);
+        end
+        if ~isempty(chosen_miss)
             plot_trial_group_figure(ch, 'Unit 2 no spike in first 10 ms', ...
                 led_events(chosen_miss), led_event_idx(chosen_miss), ...
                 trace, first_sample_s, Fs, ...
                 sample_offsets_top, sample_offsets_bottom, ...
                 t_top_ms, t_bottom_ms, cluster_ids, spike_by_unit, unit_colors, ...
-                top_window_ms, bottom_window_ms);
+                top_window_ms, bottom_window_ms, ...
+                shared_top_ylim, shared_bottom_ylim);
         end
 
         plot_unit2_overlay_figure(ch, unit2_spikes, led_events, ...
@@ -213,7 +235,7 @@ end
 
 function plot_wave_raster_tile(host_ax, t_ms, seg, is_valid, trial_time_s, ...
     cluster_ids, spike_by_unit, unit_colors, win_ms, panel_title, ...
-    show_left_labels, show_x_label)
+    show_left_labels, show_x_label, wave_ylim)
 
     host_pos = get(host_ax, 'Position');
     delete(host_ax);
@@ -229,19 +251,27 @@ function plot_wave_raster_tile(host_ax, t_ms, seg, is_valid, trial_time_s, ...
     hold(ax_wave, 'on');
     if is_valid
         plot(ax_wave, t_ms, seg, 'k', 'LineWidth', 1);
-        y_min = min(seg);
-        y_max = max(seg);
-        y_rng = y_max - y_min;
-        if y_rng < eps
-            y_pad = max(1e-6, abs(y_max) * 0.05);
+        if isempty(wave_ylim)
+            y_min = min(seg);
+            y_max = max(seg);
+            y_rng = y_max - y_min;
+            if y_rng < eps
+                y_pad = max(1e-6, abs(y_max) * 0.05);
+            else
+                y_pad = 0.02 * y_rng;
+            end
+            ylim(ax_wave, [y_min - y_pad, y_max + y_pad]);
         else
-            y_pad = 0.02 * y_rng;
+            ylim(ax_wave, wave_ylim);
         end
-        ylim(ax_wave, [y_min - y_pad, y_max + y_pad]);
     else
         text(ax_wave, mean(win_ms), 0, 'Window exceeds data bounds', ...
             'HorizontalAlignment', 'center', 'Color', [0.4 0.4 0.4]);
-        ylim(ax_wave, [-1 1]);
+        if isempty(wave_ylim)
+            ylim(ax_wave, [-1 1]);
+        else
+            ylim(ax_wave, wave_ylim);
+        end
     end
     xline(ax_wave, 0, '--', 'Color', [0.8 0 0], 'LineWidth', 1);
     xlim(ax_wave, win_ms);
@@ -298,7 +328,7 @@ end
 function plot_trial_group_figure(ch, group_label, trial_times, trial_ids, ...
     trace, first_sample_s, Fs, sample_offsets_top, sample_offsets_bottom, ...
     t_top_ms, t_bottom_ms, cluster_ids, spike_by_unit, unit_colors, ...
-    top_window_ms, bottom_window_ms)
+    top_window_ms, bottom_window_ms, top_wave_ylim, bottom_wave_ylim)
 
     n_trials = numel(trial_times);
     [seg_top, valid_top] = extract_event_segments(trace, first_sample_s, Fs, ...
@@ -319,14 +349,14 @@ function plot_trial_group_figure(ch, group_label, trial_times, trial_ids, ...
         plot_wave_raster_tile(host_top, t_top_ms, seg_top(ti, :), valid_top(ti), ...
             trial_times(ti), cluster_ids, spike_by_unit, unit_colors, ...
             top_window_ms, sprintf('LED trial #%d', trial_ids(ti)), ...
-            ti == 1, true);
+            ti == 1, true, top_wave_ylim);
 
         host_bottom = nexttile(tiled, n_trials + ti);
         plot_wave_raster_tile(host_bottom, t_bottom_ms, seg_bottom(ti, :), ...
             valid_bottom(ti), trial_times(ti), cluster_ids, spike_by_unit, ...
             unit_colors, bottom_window_ms, ...
             sprintf('LED trial #%d (zoom)', trial_ids(ti)), ...
-            ti == 1, true);
+            ti == 1, true, bottom_wave_ylim);
     end
 
     set(fig, 'Name', sprintf('visualise_waveform_ch%d_%s', ...
@@ -407,6 +437,24 @@ function [segments, valid] = extract_event_segments(trace, first_sample_s, Fs, .
             valid(ei) = true;
         end
     end
+end
+
+function y_lim = compute_shared_ylim(segments, valid)
+    y_lim = [];
+    if isempty(segments) || ~any(valid)
+        return;
+    end
+
+    seg_ok = segments(valid, :);
+    y_min = min(seg_ok(:));
+    y_max = max(seg_ok(:));
+    y_rng = y_max - y_min;
+    if y_rng < eps
+        y_pad = max(1e-6, abs(y_max) * 0.05);
+    else
+        y_pad = 0.02 * y_rng;
+    end
+    y_lim = [y_min - y_pad, y_max + y_pad];
 end
 
 function snippets = extract_spike_snippets(trace, spike_times_s, first_sample_s, Fs, sample_offsets)

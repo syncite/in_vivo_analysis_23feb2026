@@ -15,6 +15,8 @@ function extract_and_filter(plx_file, varargin)
 %   'filter_order'  — Butterworth order           [default: 3]
 %   'channels'      — which channels to process (empty = all) [default: []]
 %   'keep_raw'      — keep unfiltered channel files [default: false]
+%   'max_trials'    — keep only first N strobed events (empty = all) [default: []]
+%   'post_trial_padding_s' — seconds after Nth event to include [default: 5]
 %
 % Output structure:
 %   <plxname>.mat                                    — master file (events, metadata)
@@ -35,6 +37,8 @@ function extract_and_filter(plx_file, varargin)
     addParameter(p, 'filter_order', 3, @isnumeric);
     addParameter(p, 'channels', [], @isnumeric);
     addParameter(p, 'keep_raw', false, @islogical);
+    addParameter(p, 'max_trials', [], @(x) isempty(x) || (isnumeric(x) && isscalar(x) && x > 0));
+    addParameter(p, 'post_trial_padding_s', 5, @(x) isnumeric(x) && isscalar(x) && x >= 0);
     parse(p, plx_file, varargin{:});
     opts = p.Results;
 
@@ -80,6 +84,31 @@ function extract_and_filter(plx_file, varargin)
         channels = opts.channels;
     end
 
+    % Extract strobed events
+    [EventsNo, Eventstime, EventTag] = plx_event_ts(plx_full, 257);
+    fprintf('Strobed events: %d\n', EventsNo);
+
+    cutoff_time_s = [];
+    if ~isempty(opts.max_trials)
+        if isempty(Eventstime)
+            warning('No strobed events found; ignoring max_trials and processing full recording.');
+        else
+            n_req = max(1, round(opts.max_trials));
+            n_use = min(n_req, numel(Eventstime));
+            nth_event_time = Eventstime(n_use);
+            cutoff_time_s = nth_event_time + opts.post_trial_padding_s;
+
+            keep_evt = Eventstime <= cutoff_time_s;
+            Eventstime = Eventstime(keep_evt);
+            EventTag = EventTag(keep_evt);
+            EventsNo = numel(Eventstime);
+
+            fprintf(['Trial-limited extraction enabled: first %d events, cutoff at %.3f s ' ...
+                '(Nth=%.3f s + %.3f s); keeping %d strobed events.\n'], ...
+                n_use, cutoff_time_s, nth_event_time, opts.post_trial_padding_s, EventsNo);
+        end
+    end
+
     % Extract per-channel voltage
     firstADsamples = zeros(nChannels, 1);
     nSamples = 0;
@@ -88,17 +117,20 @@ function extract_and_filter(plx_file, varargin)
         chIdx = activeChannels(ii) - 1;  % Plexon SDK: 0-based
         [~, ~, ts, ~, ad] = plx_ad_v(plx_full, chIdx);
         firstADsamples(ii) = ts;
-        nSamples = numel(ad);
 
-        data = single(ad(:)');  %#ok<NASGU>
+        ad = ad(:)';
+        if ~isempty(cutoff_time_s)
+            keep_n = floor((cutoff_time_s - ts) * FsPlexon) + 1;
+            keep_n = min(max(keep_n, 0), numel(ad));
+            ad = ad(1:keep_n);
+        end
+
+        nSamples = numel(ad);
+        data = single(ad);  %#ok<NASGU>
         save(fullfile(outDir, sprintf('channel_%d.mat', ii)), 'data');
         fprintf('  Channel %d (Plexon ch %d): %d samples, firstAD = %.6f s\n', ...
             ii, activeChannels(ii), nSamples, ts);
     end
-
-    % Extract strobed events
-    [EventsNo, Eventstime, EventTag] = plx_event_ts(plx_full, 257);
-    fprintf('Strobed events: %d\n', EventsNo);
 
     % Print event tag summary
     unique_tags = unique(EventTag);
@@ -125,6 +157,8 @@ function extract_and_filter(plx_file, varargin)
         'freq_low', opts.freq_low, ...
         'freq_high', opts.freq_high, ...
         'filter_order', opts.filter_order, ...
+        'max_trials', opts.max_trials, ...
+        'post_trial_padding_s', opts.post_trial_padding_s, ...
         'date_processed', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
 
     masterFile = fullfile(plxDir, [plxName '.mat']);
@@ -147,21 +181,36 @@ function extract_and_filter(plx_file, varargin)
     Wn = [opts.freq_low, opts.freq_high] / (Fs / 2);
     [b, a] = butter(opts.filter_order, Wn, 'bandpass');
 
-    % Pass 1: filter each channel, accumulate mean for CAR
+    % Pass 1: filter each channel, then align lengths for CAR
     fprintf('Pass 1: bandpass filtering...\n');
     nCh = numel(channels);
     filtered = cell(nCh, 1);
-    running_sum = zeros(1, nSamples);
+    ch_lengths = zeros(1, nCh);
 
     for ii = 1:nCh
         ch = channels(ii);
         tmp = load(fullfile(outDir, sprintf('channel_%d.mat', ch)), 'data');
+        if isempty(tmp.data)
+            error(['Channel %d has no samples after trial truncation. Increase max_trials ' ...
+                'or disable max_trials.'], ch);
+        end
 
         filt_data = filtfilt(b, a, double(tmp.data));
-        running_sum = running_sum + filt_data;
         filtered{ii} = filt_data;
+        ch_lengths(ii) = numel(filt_data);
 
         fprintf('  Channel %d filtered\n', ch);
+    end
+
+    nSamples = min(ch_lengths);
+    if any(ch_lengths ~= nSamples)
+        warning('Channel lengths differ after truncation. Using first %d samples for CAR.', nSamples);
+    end
+
+    running_sum = zeros(1, nSamples);
+    for ii = 1:nCh
+        filtered{ii} = filtered{ii}(1:nSamples);
+        running_sum = running_sum + filtered{ii};
     end
 
     % Common average reference
