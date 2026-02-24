@@ -8,7 +8,7 @@ function visualise_waveform(master_mat_file, varargin)
 % For each requested channel, this function:
 %   1) loads channel_<N>_filtered_CAR.mat
 %   2) loads spike times from times_channel_<N>_*.mat (wave_clus output)
-%   3) picks 3 random LED trials
+%   3) picks random LED trials where both units have >=1 spike in window
 %   4) plots -10 ms to +10 ms around each onset (3 columns)
 %      - row 1: filtered waveform
 %      - row 2: raster (different colors per unit)
@@ -43,6 +43,7 @@ function visualise_waveform(master_mat_file, varargin)
         led_mask = all_event_tags ~= 32281;
     end
     led_events = all_event_times(led_mask);
+    led_event_idx = find(led_mask);
     if isempty(led_events)
         error('No LED events found in master file.');
     end
@@ -52,10 +53,6 @@ function visualise_waveform(master_mat_file, varargin)
     else
         rng(opts.seed);
     end
-
-    n_trials = min(max(1, round(opts.n_trials)), numel(led_events));
-    trial_ids = randperm(numel(led_events), n_trials);
-    trial_times = led_events(trial_ids);
 
     [masterPath, masterName, ~] = fileparts(opts.master_mat_file);
     channelDir = fullfile(masterPath, [masterName '_channels']);
@@ -116,6 +113,53 @@ function visualise_waveform(master_mat_file, varargin)
             end
         end
 
+        n_units = numel(cluster_ids);
+        if n_units < 2
+            warning(['Channel %d: found %d unit(s). Need at least 2 units to ' ...
+                'select trials where both units spike. Skipping.'], ch, n_units);
+            continue;
+        end
+
+        % Use the first two sorted clusters as the required "both units".
+        required_units = 1:2;
+        eligible = false(1, numel(led_events));
+        for ei = 1:numel(led_events)
+            t0 = led_events(ei);
+
+            event_sample = round((t0 - first_sample_s) * Fs) + 1;
+            idx = event_sample + sample_offsets;
+            if idx(1) < 1 || idx(end) > numel(trace)
+                continue;
+            end
+
+            both_units_spike = true;
+            for ui = required_units
+                rel_ms = (spike_by_unit{ui} - t0) * 1000;
+                in_win = rel_ms >= -opts.window_ms & rel_ms <= opts.window_ms;
+                if ~any(in_win)
+                    both_units_spike = false;
+                    break;
+                end
+            end
+            eligible(ei) = both_units_spike;
+        end
+
+        eligible_idx = find(eligible);
+        if isempty(eligible_idx)
+            warning(['Channel %d: no LED trials where both required units have ' ...
+                'spikes within +/- %.1f ms. Skipping.'], ch, opts.window_ms);
+            continue;
+        end
+
+        n_trials = min(max(1, round(opts.n_trials)), numel(eligible_idx));
+        if numel(eligible_idx) < round(opts.n_trials)
+            warning('Channel %d: only %d qualifying trials found (requested %d).', ...
+                ch, numel(eligible_idx), round(opts.n_trials));
+        end
+        chosen = eligible_idx(randperm(numel(eligible_idx), n_trials));
+        trial_times = led_events(chosen);
+        trial_ids = led_event_idx(chosen);
+
         seg = nan(n_trials, numel(sample_offsets));
         valid_trial = false(1, n_trials);
         for ti = 1:n_trials
@@ -131,17 +175,6 @@ function visualise_waveform(master_mat_file, varargin)
         tiled = tiledlayout(2, n_trials, 'TileSpacing', 'compact', 'Padding', 'compact');
         title(tiled, sprintf('Channel %d | %d random LED trials | window = +/- %d ms', ...
             ch, n_trials, round(opts.window_ms)));
-
-        if any(valid_trial)
-            y_min = min(seg(valid_trial, :), [], 'all');
-            y_max = max(seg(valid_trial, :), [], 'all');
-            y_pad = max(1, 0.05 * (y_max - y_min + eps));
-            wave_ylim = [y_min - y_pad, y_max + y_pad];
-        else
-            wave_ylim = [];
-        end
-
-        n_units = numel(cluster_ids);
         unit_colors = lines(max(n_units, 1));
 
         for ti = 1:n_trials
@@ -155,7 +188,17 @@ function visualise_waveform(master_mat_file, varargin)
             end
             xline(ax_wave, 0, '--', 'Color', [0.8 0 0], 'LineWidth', 1);
             xlim(ax_wave, [-opts.window_ms opts.window_ms]);
-            if ~isempty(wave_ylim), ylim(ax_wave, wave_ylim); end
+            if valid_trial(ti)
+                y_min = min(seg(ti, :));
+                y_max = max(seg(ti, :));
+                y_rng = y_max - y_min;
+                if y_rng < eps
+                    y_pad = max(1e-6, abs(y_max) * 0.05);
+                else
+                    y_pad = 0.02 * y_rng;
+                end
+                ylim(ax_wave, [y_min - y_pad, y_max + y_pad]);
+            end
             grid(ax_wave, 'on');
             if ti == 1
                 ylabel(ax_wave, 'Filtered signal');
