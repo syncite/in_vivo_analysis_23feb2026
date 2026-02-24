@@ -1,5 +1,5 @@
 function visualise_waveform(master_mat_file, varargin)
-% VISUALISE_WAVEFORM  Plot filtered trace + unit raster around random LED trials.
+% VISUALISE_WAVEFORM  Plot filtered trace with raster strips around random LED trials.
 %
 %   visualise_waveform()                         % file picker for master .mat
 %   visualise_waveform('path/to/master.mat')
@@ -9,20 +9,32 @@ function visualise_waveform(master_mat_file, varargin)
 %   1) loads channel_<N>_filtered_CAR.mat
 %   2) loads spike times from times_channel_<N>_*.mat (wave_clus output)
 %   3) picks random LED trials where both units have >=1 spike in window
-%   4) plots -10 ms to +10 ms around each onset (3 columns)
-%      - row 1: filtered waveform
-%      - row 2: raster (different colors per unit)
+%   4) plots two rows per trial:
+%      - top row: wider window
+%      - bottom row: zoomed window
+%      Each panel contains waveform (top) + raster strip just below it.
+
+    % Editable plot windows (ms): [start end]
+    top_window_ms = [-25 50];
+    bottom_window_ms = [25 35];
 
     p = inputParser;
     addOptional(p, 'master_mat_file', '', @ischar);
     addParameter(p, 'channels', [], @isnumeric);
     addParameter(p, 'n_trials', 3, @isnumeric);
-    addParameter(p, 'window_ms', 10, @isnumeric);
+    addParameter(p, 'window_ms', [], @(x) isempty(x) || isnumeric(x));
     addParameter(p, 'timing_correction', 0.02295, @isnumeric);
     addParameter(p, 'led_tags', [32385 32297 32329 32321 32417], @isnumeric);
     addParameter(p, 'seed', [], @(x) isempty(x) || isnumeric(x));
     parse(p, master_mat_file, varargin{:});
     opts = p.Results;
+
+    % Backward compatibility: if provided, use symmetric window for top row.
+    if ~isempty(opts.window_ms)
+        top_window_ms = [-abs(opts.window_ms) abs(opts.window_ms)];
+    end
+    top_window_ms = sort(top_window_ms(:)');
+    bottom_window_ms = sort(bottom_window_ms(:)');
 
     if isempty(opts.master_mat_file)
         [matFile, matPath] = uigetfile('*.mat', ...
@@ -35,7 +47,7 @@ function visualise_waveform(master_mat_file, varargin)
         'Eventstime', 'EventTag', 'nChannels', 'FsPlexon', ...
         'firstADsamples', 'firstADsample');
 
-    all_event_times = master.Eventstime(:)' - opts.timing_correction;
+    all_event_times = master.Eventstime(:)' + opts.timing_correction;
     all_event_tags = master.EventTag(:)';
 
     led_mask = ismember(all_event_tags, opts.led_tags);
@@ -68,10 +80,12 @@ function visualise_waveform(master_mat_file, varargin)
     end
 
     Fs = master.FsPlexon;
-    n_before = round((opts.window_ms / 1000) * Fs);
-    n_after = round((opts.window_ms / 1000) * Fs);
-    sample_offsets = -n_before:n_after;
-    t_ms = sample_offsets / Fs * 1000;
+    sample_offsets_top = round((top_window_ms(1) / 1000) * Fs) : ...
+                         round((top_window_ms(2) / 1000) * Fs);
+    sample_offsets_bottom = round((bottom_window_ms(1) / 1000) * Fs) : ...
+                            round((bottom_window_ms(2) / 1000) * Fs);
+    t_top_ms = sample_offsets_top / Fs * 1000;
+    t_bottom_ms = sample_offsets_bottom / Fs * 1000;
 
     for ch = channels
         filt_candidates = {
@@ -130,15 +144,15 @@ function visualise_waveform(master_mat_file, varargin)
             t0 = led_events(ei);
 
             event_sample = round((t0 - first_sample_s) * Fs) + 1;
-            idx = event_sample + sample_offsets;
-            if idx(1) < 1 || idx(end) > numel(trace)
+            idx_top = event_sample + sample_offsets_top;
+            if idx_top(1) < 1 || idx_top(end) > numel(trace)
                 continue;
             end
 
             both_units_spike = true;
             for ui = required_units
                 rel_ms = (spike_by_unit{ui} - t0) * 1000;
-                in_win = rel_ms >= -opts.window_ms & rel_ms <= opts.window_ms;
+                in_win = rel_ms >= top_window_ms(1) & rel_ms <= top_window_ms(2);
                 if ~any(in_win)
                     both_units_spike = false;
                     break;
@@ -150,7 +164,8 @@ function visualise_waveform(master_mat_file, varargin)
         eligible_idx = find(eligible);
         if isempty(eligible_idx)
             warning(['Channel %d: no LED trials where both required units have ' ...
-                'spikes within +/- %.1f ms. Skipping.'], ch, opts.window_ms);
+                'spikes in %.1f to %.1f ms. Skipping.'], ...
+                ch, top_window_ms(1), top_window_ms(2));
             continue;
         end
 
@@ -163,83 +178,134 @@ function visualise_waveform(master_mat_file, varargin)
         trial_times = led_events(chosen);
         trial_ids = led_event_idx(chosen);
 
-        seg = nan(n_trials, numel(sample_offsets));
-        valid_trial = false(1, n_trials);
+        seg_top = nan(n_trials, numel(sample_offsets_top));
+        seg_bottom = nan(n_trials, numel(sample_offsets_bottom));
+        valid_top = false(1, n_trials);
+        valid_bottom = false(1, n_trials);
         for ti = 1:n_trials
             event_sample = round((trial_times(ti) - first_sample_s) * Fs) + 1;
-            idx = event_sample + sample_offsets;
-            if idx(1) >= 1 && idx(end) <= numel(trace)
-                seg(ti, :) = trace(idx);
-                valid_trial(ti) = true;
+
+            idx_top = event_sample + sample_offsets_top;
+            if idx_top(1) >= 1 && idx_top(end) <= numel(trace)
+                seg_top(ti, :) = trace(idx_top);
+                valid_top(ti) = true;
+            end
+
+            idx_bottom = event_sample + sample_offsets_bottom;
+            if idx_bottom(1) >= 1 && idx_bottom(end) <= numel(trace)
+                seg_bottom(ti, :) = trace(idx_bottom);
+                valid_bottom(ti) = true;
             end
         end
 
-        fig = figure('Color', 'w', 'Position', [80 120 1500 700]);
+        fig = figure('Color', 'w', 'Position', [80 120 1500 820]);
         tiled = tiledlayout(2, n_trials, 'TileSpacing', 'compact', 'Padding', 'compact');
-        title(tiled, sprintf('Channel %d | %d random LED trials | window = +/- %d ms', ...
-            ch, n_trials, round(opts.window_ms)));
+        title(tiled, sprintf(['Channel %d | %d random LED trials | top %.1f to %.1f ms | ' ...
+            'bottom %.1f to %.1f ms'], ...
+            ch, n_trials, top_window_ms(1), top_window_ms(2), ...
+            bottom_window_ms(1), bottom_window_ms(2)));
         unit_colors = lines(max(n_units, 1));
 
         for ti = 1:n_trials
-            ax_wave = nexttile(tiled, ti);
-            hold(ax_wave, 'on');
-            if valid_trial(ti)
-                plot(ax_wave, t_ms, seg(ti, :), 'k', 'LineWidth', 1);
-            else
-                text(ax_wave, 0, 0, 'Window exceeds data bounds', ...
-                    'HorizontalAlignment', 'center', 'Color', [0.4 0.4 0.4]);
-            end
-            xline(ax_wave, 0, '--', 'Color', [0.8 0 0], 'LineWidth', 1);
-            xlim(ax_wave, [-opts.window_ms opts.window_ms]);
-            if valid_trial(ti)
-                y_min = min(seg(ti, :));
-                y_max = max(seg(ti, :));
-                y_rng = y_max - y_min;
-                if y_rng < eps
-                    y_pad = max(1e-6, abs(y_max) * 0.05);
-                else
-                    y_pad = 0.02 * y_rng;
-                end
-                ylim(ax_wave, [y_min - y_pad, y_max + y_pad]);
-            end
-            grid(ax_wave, 'on');
-            if ti == 1
-                ylabel(ax_wave, 'Filtered signal');
-            end
-            title(ax_wave, sprintf('LED trial #%d', trial_ids(ti)));
+            host_top = nexttile(tiled, ti);
+            plot_wave_raster_tile(host_top, t_top_ms, seg_top(ti, :), valid_top(ti), ...
+                trial_times(ti), cluster_ids, spike_by_unit, unit_colors, ...
+                top_window_ms, sprintf('LED trial #%d', trial_ids(ti)), ...
+                ti == 1, false);
 
-            ax_raster = nexttile(tiled, n_trials + ti);
-            hold(ax_raster, 'on');
-            xline(ax_raster, 0, '--', 'Color', [0.8 0 0], 'LineWidth', 1);
-            xlim(ax_raster, [-opts.window_ms opts.window_ms]);
-            grid(ax_raster, 'on');
-            xlabel(ax_raster, 'Time from LED onset (ms)');
-
-            if n_units == 0
-                text(ax_raster, 0, 0.5, 'No sorted units found for this channel', ...
-                    'HorizontalAlignment', 'center', 'Color', [0.4 0.4 0.4]);
-                ylim(ax_raster, [0 1]);
-                set(ax_raster, 'YTick', []);
-            else
-                for ui = 1:n_units
-                    rel_ms = (spike_by_unit{ui} - trial_times(ti)) * 1000;
-                    rel_ms = rel_ms(rel_ms >= -opts.window_ms & rel_ms <= opts.window_ms);
-                    if ~isempty(rel_ms)
-                        scatter(ax_raster, rel_ms, ui * ones(size(rel_ms)), ...
-                            22, unit_colors(ui, :), 'filled', 'MarkerFaceAlpha', 0.8);
-                    end
-                end
-                ylim(ax_raster, [0.5 n_units + 0.5]);
-                yticks(ax_raster, 1:n_units);
-                yticklabels(ax_raster, arrayfun(@(x) sprintf('Cl%d', x), ...
-                    cluster_ids, 'UniformOutput', false));
-                if ti == 1
-                    ylabel(ax_raster, 'Unit');
-                end
-            end
+            host_bottom = nexttile(tiled, n_trials + ti);
+            plot_wave_raster_tile(host_bottom, t_bottom_ms, seg_bottom(ti, :), ...
+                valid_bottom(ti), trial_times(ti), cluster_ids, spike_by_unit, ...
+                unit_colors, bottom_window_ms, ...
+                sprintf('LED trial #%d (zoom)', trial_ids(ti)), ...
+                ti == 1, true);
         end
 
         set(fig, 'Name', sprintf('visualise_waveform_ch%d', ch));
+    end
+end
+
+function plot_wave_raster_tile(host_ax, t_ms, seg, is_valid, trial_time_s, ...
+    cluster_ids, spike_by_unit, unit_colors, win_ms, panel_title, ...
+    show_left_labels, show_x_label)
+
+    host_pos = get(host_ax, 'Position');
+    delete(host_ax);
+
+    raster_frac = 0.30;
+    gap_frac = 0.05;
+    wave_frac = 1 - raster_frac - gap_frac;
+    wave_pos = [host_pos(1), host_pos(2) + host_pos(4)*(raster_frac + gap_frac), ...
+                host_pos(3), host_pos(4)*wave_frac];
+    raster_pos = [host_pos(1), host_pos(2), host_pos(3), host_pos(4)*raster_frac];
+
+    ax_wave = axes('Position', wave_pos);
+    hold(ax_wave, 'on');
+    if is_valid
+        plot(ax_wave, t_ms, seg, 'k', 'LineWidth', 1);
+        y_min = min(seg);
+        y_max = max(seg);
+        y_rng = y_max - y_min;
+        if y_rng < eps
+            y_pad = max(1e-6, abs(y_max) * 0.05);
+        else
+            y_pad = 0.02 * y_rng;
+        end
+        ylim(ax_wave, [y_min - y_pad, y_max + y_pad]);
+    else
+        text(ax_wave, mean(win_ms), 0, 'Window exceeds data bounds', ...
+            'HorizontalAlignment', 'center', 'Color', [0.4 0.4 0.4]);
+        ylim(ax_wave, [-1 1]);
+    end
+    xline(ax_wave, 0, '--', 'Color', [0.8 0 0], 'LineWidth', 1);
+    xlim(ax_wave, win_ms);
+    grid(ax_wave, 'on');
+    box(ax_wave, 'on');
+    set(ax_wave, 'XTickLabel', []);
+    if show_left_labels
+        ylabel(ax_wave, 'Filtered signal');
+    else
+        set(ax_wave, 'YTickLabel', []);
+    end
+    title(ax_wave, panel_title, 'FontSize', 9);
+
+    ax_raster = axes('Position', raster_pos);
+    hold(ax_raster, 'on');
+    xline(ax_raster, 0, '--', 'Color', [0.8 0 0], 'LineWidth', 1);
+    xlim(ax_raster, win_ms);
+    grid(ax_raster, 'on');
+    box(ax_raster, 'on');
+
+    n_units = numel(cluster_ids);
+    if n_units == 0
+        text(ax_raster, mean(win_ms), 0.5, 'No sorted units found for this channel', ...
+            'HorizontalAlignment', 'center', 'Color', [0.4 0.4 0.4]);
+        ylim(ax_raster, [0 1]);
+        set(ax_raster, 'YTick', []);
+    else
+        for ui = 1:n_units
+            rel_ms = (spike_by_unit{ui} - trial_time_s) * 1000;
+            rel_ms = rel_ms(rel_ms >= win_ms(1) & rel_ms <= win_ms(2));
+            if ~isempty(rel_ms)
+                scatter(ax_raster, rel_ms, ui * ones(size(rel_ms)), ...
+                    22, unit_colors(ui, :), 'filled', 'MarkerFaceAlpha', 0.8);
+            end
+        end
+        ylim(ax_raster, [0.5 n_units + 0.5]);
+        yticks(ax_raster, 1:n_units);
+        yticklabels(ax_raster, arrayfun(@(x) sprintf('Cl%d', x), ...
+            cluster_ids, 'UniformOutput', false));
+    end
+
+    if show_left_labels
+        ylabel(ax_raster, 'Unit');
+    else
+        set(ax_raster, 'YTickLabel', []);
+    end
+    if show_x_label
+        xlabel(ax_raster, 'Time from LED onset (ms)');
+    else
+        set(ax_raster, 'XTickLabel', []);
     end
 end
 

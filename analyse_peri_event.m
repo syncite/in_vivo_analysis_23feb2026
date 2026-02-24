@@ -15,7 +15,7 @@ function analyse_peri_event(master_mat_file, varargin)
 %   'channels'           — channel indices [default: all]
 %   'window'             — [pre post] in seconds [default: [-1 2]]
 %   'bin_size'           — PSTH bin width in seconds [default: 0.02]
-%   'timing_correction'  — strobe latency in seconds [default: 0.02295]
+%   'timing_correction'  — event time shift in seconds (+ later, - earlier) [default: 0.02295]
 %   'baseline_window'    — [start end] for z-score baseline [default: [-1 0]]
 %   'heatmap_bin'        — bin width for heatmap [default: 0.1]
 %   'min_spikes'         — minimum spikes to include a unit [default: 50]
@@ -57,7 +57,7 @@ function analyse_peri_event(master_mat_file, varargin)
         'nChannels', 'FsPlexon', 'firstADsamples', 'firstADsample');
 
     Fs = master.FsPlexon;
-    all_event_times = master.Eventstime(:)' - opts.timing_correction;
+    all_event_times = master.Eventstime(:)' + opts.timing_correction;
     all_event_tags  = master.EventTag(:)';
 
     [masterPath, masterName, ~] = fileparts(opts.master_mat_file);
@@ -83,7 +83,8 @@ function analyse_peri_event(master_mat_file, varargin)
 
     fprintf('Master file: %s\n', opts.master_mat_file);
     fprintf('Channel dir: %s\n', channelDir);
-    fprintf('Timing correction: %.4f s\n', opts.timing_correction);
+    fprintf('Event time shift applied: %+0.4f s (%+.2f ms)\n', ...
+        opts.timing_correction, opts.timing_correction*1000);
     fprintf('Window: [%.1f, %.1f] s | PSTH bin: %.0f ms | Heatmap bin: %.0f ms\n', ...
         opts.window(1), opts.window(2), opts.bin_size*1000, opts.heatmap_bin*1000);
 
