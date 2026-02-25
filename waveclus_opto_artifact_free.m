@@ -30,10 +30,16 @@ function waveclus_opto_artifact_free(master_mat_file, varargin)
 %   'led_tags'              : event tags considered LED trials [32385]
 %   'led_duration_s'        : scalar or per-tag durations (s)   1.0
 %   'post_led_buffer_s'     : fixed post-offset exclusion (s)   0.1
-%   'distance_threshold_sd' : dirty assignment threshold        3
 %   'overwrite_main_times'  : in assign mode, replace times_*.mat [true]
 %   'run_clustering'        : in prepare mode, run Do_clustering [true]
 %   'debug'                 : print Get_spikes path diagnostics [false]
+%
+% Hard-coded defaults (to keep commands simple):
+%   - time reference mode: index_ms+firstAD
+%   - assign unlabeled clean spikes in step2: true
+%   - clean reassignment threshold: 2.5 SD
+%   - dirty reassignment threshold: 2.5 SD
+%   - save step2 PNG summary: true
 %
 % Files created per channel:
 %   channel_<N>_..._spikes.mat       - full spikes (from Get_spikes)
@@ -51,7 +57,6 @@ function waveclus_opto_artifact_free(master_mat_file, varargin)
     addParameter(p, 'led_tags', 32385, @isnumeric);
     addParameter(p, 'led_duration_s', 1.0, @(x) isnumeric(x) && all(x > 0));
     addParameter(p, 'post_led_buffer_s', 0.1, @(x) isnumeric(x) && isscalar(x) && x >= 0);
-    addParameter(p, 'distance_threshold_sd', 3, @(x) isnumeric(x) && isscalar(x) && x > 0);
     addParameter(p, 'overwrite_main_times', true, @islogical);
     addParameter(p, 'run_clustering', true, @islogical);
     addParameter(p, 'debug', false, @islogical);
@@ -62,6 +67,13 @@ function waveclus_opto_artifact_free(master_mat_file, varargin)
     if ~ismember(opts.mode, {'prepare', 'assign'})
         error('mode must be ''prepare'' or ''assign''.');
     end
+
+    % Fixed settings for reproducible two-pass workflow.
+    opts.time_reference_mode = normalize_time_reference_mode('index_ms+firstAD');
+    opts.assign_unlabeled_clean = true;
+    opts.clean_distance_threshold_sd = 2.5;
+    opts.distance_threshold_sd = 2.5;
+    opts.save_assignment_png = true;
 
     if isscalar(opts.led_duration_s)
         opts.led_duration_s = repmat(opts.led_duration_s, size(opts.led_tags));
@@ -107,6 +119,9 @@ function waveclus_opto_artifact_free(master_mat_file, varargin)
     fprintf('Master: %s\n', opts.master_mat_file);
     fprintf('Channel dir: %s\n', channelDir);
     fprintf('Channels: %s\n', mat2str(channels));
+    fprintf('Time reference mode: %s\n', opts.time_reference_mode);
+    fprintf('Step2 assignment: clean unlabeled=%d (thr=%.2f SD), dirty thr=%.2f SD\n', ...
+        opts.assign_unlabeled_clean, opts.clean_distance_threshold_sd, opts.distance_threshold_sd);
     if numel(unique(opts.led_duration_s(:))) == 1
         fprintf(['Masking rule: [LED onset, LED onset + %.3f + %.3f] s ' ...
             '(duration + fixed post-offset buffer)\n'], opts.led_duration_s(1), opts.post_led_buffer_s);
@@ -181,7 +196,8 @@ function run_prepare(master, channelDir, channels, led_windows, opts)
         [index_raw, index_field] = get_index_field(fullData, spkFileFull);
 
         first_sample_s = get_first_sample_seconds(master, ch);
-        [spike_s, ref_mode] = infer_spike_times_seconds(index_raw, sr, first_sample_s, master.Eventstime(:));
+        [spike_s, ref_mode] = infer_spike_times_seconds( ...
+            index_raw, sr, first_sample_s, master.Eventstime(:), opts.time_reference_mode);
 
         dirty_mask = in_any_window(spike_s, led_windows);
         clean_mask = ~dirty_mask;
@@ -442,6 +458,7 @@ function run_assign(master, channelDir, channels, opts)
                 'Check time reference consistency.'], ch, n_match, size(cc,1), mode_label);
         end
 
+        cc_original = cc;
         clean_labels = zeros(numel(clean_index), 1);
         for i = 1:size(cc,1)
             idx = cc_to_clean(i);
@@ -450,13 +467,43 @@ function run_assign(master, channelDir, channels, opts)
             end
         end
 
-        [dirty_labels, dirty_best_dist, template_stats] = assign_dirty_spikes( ...
-            clean_spikes, clean_labels, dirty_spikes, opts.distance_threshold_sd);
+        n_clean_unassigned_before = sum(clean_labels == 0);
+        clean_labels_for_templates = clean_labels;
+        clean_reassigned_labels = zeros(size(clean_labels));
+        clean_reassigned_best_dist = inf(size(clean_labels));
+
+        if opts.assign_unlabeled_clean
+            clean_unassigned_mask = clean_labels == 0;
+            if any(clean_unassigned_mask)
+                [labels_tmp, d_tmp, ~] = assign_spikes_to_templates( ...
+                    clean_spikes, clean_labels, ...
+                    clean_spikes(clean_unassigned_mask, :), ...
+                    opts.clean_distance_threshold_sd);
+                idx_unassigned = find(clean_unassigned_mask);
+                clean_reassigned_labels(idx_unassigned) = labels_tmp;
+                clean_reassigned_best_dist(idx_unassigned) = d_tmp;
+                clean_labels_for_templates(idx_unassigned) = labels_tmp;
+            end
+        end
+
+        cc_clean_reassigned = cc;
+        n_cc_clean_reassigned = 0;
+        for i = 1:size(cc_clean_reassigned, 1)
+            idx = cc_to_clean(i);
+            if idx > 0 && cc_clean_reassigned(i,1) == 0 && clean_labels_for_templates(idx) > 0
+                cc_clean_reassigned(i,1) = clean_labels_for_templates(idx);
+                n_cc_clean_reassigned = n_cc_clean_reassigned + 1;
+            end
+        end
+        n_clean_unassigned_after = sum(clean_labels_for_templates == 0);
+
+        [dirty_labels, dirty_best_dist, template_stats] = assign_spikes_to_templates( ...
+            clean_spikes, clean_labels_for_templates, dirty_spikes, opts.distance_threshold_sd);
 
         dirty_time_ms = transform_index_to_ms(double(dirty_index), sr, first_sample_s, mode_id);
         dirty_cc = [double(dirty_labels(:)) double(dirty_time_ms(:))];
 
-        cc_combined = [cc; dirty_cc];
+        cc_combined = [cc_clean_reassigned; dirty_cc];
         [~, sort_idx] = sort(cc_combined(:,2), 'ascend');
         cc_combined = cc_combined(sort_idx, :);
 
@@ -488,10 +535,18 @@ function run_assign(master, channelDir, channels, opts)
         led_assign_info = struct();
         led_assign_info.created_at = datestr(now, 'yyyy-mm-dd HH:MM:SS');
         led_assign_info.distance_threshold_sd = opts.distance_threshold_sd;
+        led_assign_info.assign_unlabeled_clean = opts.assign_unlabeled_clean;
+        led_assign_info.clean_distance_threshold_sd = opts.clean_distance_threshold_sd;
         led_assign_info.template_mode = 'normalized_waveform_distance';
         led_assign_info.time_transform_mode = mode_label;
         led_assign_info.cc_match_count = n_match;
         led_assign_info.cc_total = size(cc,1);
+        led_assign_info.n_clean = numel(clean_index);
+        led_assign_info.n_clean_unassigned_before = n_clean_unassigned_before;
+        led_assign_info.n_clean_reassigned = sum(clean_reassigned_labels > 0);
+        led_assign_info.n_cc_rows_reassigned = n_cc_clean_reassigned;
+        led_assign_info.n_clean_unassigned_after = n_clean_unassigned_after;
+        led_assign_info.clean_reassigned_best_distance = clean_reassigned_best_dist(:);
         led_assign_info.n_dirty = numel(dirty_index);
         led_assign_info.n_dirty_assigned = sum(dirty_labels > 0);
         led_assign_info.n_dirty_unassigned = sum(dirty_labels == 0);
@@ -527,9 +582,30 @@ function run_assign(master, channelDir, channels, opts)
         assignment_report.dirty_labels = dirty_labels(:);
         assignment_report.dirty_best_distance = dirty_best_dist(:);
         assignment_report.distance_threshold_sd = opts.distance_threshold_sd;
+        assignment_report.assign_unlabeled_clean = opts.assign_unlabeled_clean;
+        assignment_report.clean_distance_threshold_sd = opts.clean_distance_threshold_sd;
+        assignment_report.clean_labels_initial = clean_labels(:);
+        assignment_report.clean_labels_after_reassign = clean_labels_for_templates(:);
+        assignment_report.clean_reassigned_labels = clean_reassigned_labels(:);
+        assignment_report.clean_reassigned_best_distance = clean_reassigned_best_dist(:);
         assignment_report.template_stats = template_stats;
         save(reportFile, 'assignment_report');
 
+        if opts.save_assignment_png
+            pngFile = strrep(timesFile, '.mat', '_assignment_summary.png');
+            try
+                save_assignment_summary_png(ch, pngFile, cc_original(:,1), ...
+                    cc_clean_reassigned(:,1), dirty_best_dist, dirty_labels, ...
+                    opts.distance_threshold_sd, n_clean_unassigned_before, ...
+                    n_clean_unassigned_after, sum(clean_reassigned_labels > 0));
+                fprintf('  Assignment PNG: %s\n', pngFile);
+            catch MEpng
+                warning('Channel %d: failed to save assignment PNG (%s).', ch, MEpng.message);
+            end
+        end
+
+        fprintf('  Clean cluster0: before=%d | reassigned=%d | after=%d\n', ...
+            n_clean_unassigned_before, sum(clean_reassigned_labels > 0), n_clean_unassigned_after);
         fprintf('  Dirty spikes: %d | assigned: %d | unassigned: %d\n', ...
             numel(dirty_index), sum(dirty_labels > 0), sum(dirty_labels == 0));
         fprintf('  Assignment report: %s\n', reportFile);
@@ -995,7 +1071,12 @@ function merged = merge_windows(windows)
     end
 end
 
-function [spike_s, mode] = infer_spike_times_seconds(index_raw, sr, first_sample_s, event_s)
+function [spike_s, mode] = infer_spike_times_seconds(index_raw, sr, first_sample_s, event_s, requested_mode)
+    if nargin < 5 || isempty(requested_mode)
+        requested_mode = 'auto';
+    end
+    requested_mode = normalize_time_reference_mode(requested_mode);
+
     idx = double(index_raw(:));
     cands = {
         idx / 1000, 'index_ms'
@@ -1003,6 +1084,17 @@ function [spike_s, mode] = infer_spike_times_seconds(index_raw, sr, first_sample
         idx / 1000 + first_sample_s, 'index_ms+firstAD'
         idx / sr + first_sample_s, 'index_samples+firstAD'
     };
+
+    if ~strcmp(requested_mode, 'auto')
+        labels = cands(:,2);
+        k = find(strcmp(labels, requested_mode), 1, 'first');
+        if isempty(k)
+            error('Unsupported time reference mode: %s', requested_mode);
+        end
+        spike_s = cands{k,1};
+        mode = cands{k,2};
+        return;
+    end
 
     if isempty(event_s)
         spike_s = cands{1,1};
@@ -1024,6 +1116,21 @@ function [spike_s, mode] = infer_spike_times_seconds(index_raw, sr, first_sample
     [~, best] = max(scores);
     spike_s = cands{best,1};
     mode = cands{best,2};
+end
+
+function mode = normalize_time_reference_mode(mode_in)
+    mode = lower(strtrim(char(mode_in)));
+    mode = strrep(mode, ' ', '');
+    valid = {'auto', 'index_ms', 'index_samples', 'index_ms+firstad', 'index_samples+firstad'};
+    if ~ismember(mode, valid)
+        error(['time_reference_mode must be one of: auto, index_ms, index_samples, ' ...
+            'index_ms+firstAD, index_samples+firstAD']);
+    end
+    if strcmp(mode, 'index_ms+firstad')
+        mode = 'index_ms+firstAD';
+    elseif strcmp(mode, 'index_samples+firstad')
+        mode = 'index_samples+firstAD';
+    end
 end
 
 function mask = in_any_window(t, windows)
@@ -1088,40 +1195,112 @@ function time_ms = transform_index_to_ms(index_raw, sr, first_sample_s, mode_id)
     end
 end
 
-function [dirty_labels, dirty_best_dist, template_stats] = assign_dirty_spikes( ...
-    clean_spikes, clean_labels, dirty_spikes, threshold_sd)
+function [target_labels, target_best_dist, template_stats] = assign_spikes_to_templates( ...
+    template_spikes, template_labels, target_spikes, threshold_sd)
 
-    clean_labels = double(clean_labels(:));
-    dirty_labels = zeros(size(dirty_spikes,1), 1);
-    dirty_best_dist = inf(size(dirty_spikes,1), 1);
+    template_labels = double(template_labels(:));
+    target_labels = zeros(size(target_spikes,1), 1);
+    target_best_dist = inf(size(target_spikes,1), 1);
 
-    cids = unique(clean_labels(clean_labels > 0));
+    cids = unique(template_labels(template_labels > 0));
     template_stats = struct('cluster_id', {}, 'n_spikes', {});
-    if isempty(cids) || isempty(dirty_spikes)
+    if isempty(cids) || isempty(target_spikes)
         return;
     end
 
     K = numel(cids);
-    D = inf(size(dirty_spikes,1), K);
+    D = inf(size(target_spikes,1), K);
 
     for ki = 1:K
         cid = cids(ki);
-        mask = clean_labels == cid;
-        w = clean_spikes(mask, :);
+        mask = template_labels == cid;
+        w = template_spikes(mask, :);
         mu = mean(w, 1);
         sd = std(w, 0, 1);
         sd(sd < 1e-6) = 1e-6;
 
-        z = (dirty_spikes - mu) ./ sd;
+        z = (target_spikes - mu) ./ sd;
         D(:, ki) = sqrt(mean(z.^2, 2));
 
         template_stats(ki).cluster_id = cid;
         template_stats(ki).n_spikes = sum(mask);
     end
 
-    [dirty_best_dist, best_idx] = min(D, [], 2);
-    pass = dirty_best_dist <= threshold_sd;
-    dirty_labels(pass) = cids(best_idx(pass));
+    [target_best_dist, best_idx] = min(D, [], 2);
+    pass = target_best_dist <= threshold_sd;
+    target_labels(pass) = cids(best_idx(pass));
+end
+
+function save_assignment_summary_png(ch, png_file, cc_before_labels, cc_after_clean_labels, ...
+    dirty_best_dist, dirty_labels, dirty_threshold_sd, ...
+    n_clean_unassigned_before, n_clean_unassigned_after, n_clean_reassigned)
+
+    fig = figure('Color', 'w', 'Visible', 'off', 'Position', [80 80 1050 760]);
+    tl = tiledlayout(2, 2, 'Padding', 'compact', 'TileSpacing', 'compact');
+    title(tl, sprintf('Channel %d Step2 Assignment Summary', ch), 'FontWeight', 'bold');
+
+    ax1 = nexttile(tl, 1);
+    hold(ax1, 'on');
+    ids = unique([cc_before_labels(:); cc_after_clean_labels(:)]);
+    ids = ids(:)';
+    if isempty(ids), ids = 0; end
+    ids = sort(ids);
+    x = 1:numel(ids);
+    c_before = arrayfun(@(k) sum(cc_before_labels == k), ids);
+    c_after = arrayfun(@(k) sum(cc_after_clean_labels == k), ids);
+    b = bar(ax1, x, [c_before(:) c_after(:)], 'grouped'); %#ok<NASGU>
+    set(ax1, 'XTick', x, 'XTickLabel', arrayfun(@num2str, ids, 'UniformOutput', false));
+    xlabel(ax1, 'Cluster ID');
+    ylabel(ax1, 'Spike count');
+    title(ax1, 'Clean labels before vs after clean reassignment');
+    legend(ax1, {'Before', 'After'}, 'Location', 'best');
+    grid(ax1, 'on');
+    box(ax1, 'on');
+
+    ax2 = nexttile(tl, 2);
+    hold(ax2, 'on');
+    if isempty(dirty_best_dist)
+        text(ax2, 0.5, 0.5, 'No dirty spikes', 'Units', 'normalized', ...
+            'HorizontalAlignment', 'center');
+        axis(ax2, 'off');
+    else
+        histogram(ax2, dirty_best_dist, 50, 'FaceColor', [0.2 0.5 0.9], 'EdgeColor', 'none');
+        xline(ax2, dirty_threshold_sd, '--r', sprintf('thr=%.2f', dirty_threshold_sd), 'LineWidth', 1.5);
+        xlabel(ax2, 'Best normalized distance');
+        ylabel(ax2, 'Count');
+        title(ax2, 'Dirty spike template distances');
+        grid(ax2, 'on');
+        box(ax2, 'on');
+    end
+
+    ax3 = nexttile(tl, 3);
+    hold(ax3, 'on');
+    n_dirty = numel(dirty_labels);
+    n_dirty_assigned = sum(dirty_labels > 0);
+    n_dirty_unassigned = sum(dirty_labels == 0);
+    bar(ax3, [1 2], [n_dirty_assigned n_dirty_unassigned], 0.6, ...
+        'FaceColor', [0.3 0.7 0.3], 'EdgeColor', 'none');
+    set(ax3, 'XTick', [1 2], 'XTickLabel', {'Dirty assigned', 'Dirty unassigned'});
+    ylabel(ax3, 'Count');
+    title(ax3, sprintf('Dirty assignment (n=%d)', n_dirty));
+    grid(ax3, 'on');
+    box(ax3, 'on');
+
+    ax4 = nexttile(tl, 4);
+    axis(ax4, 'off');
+    txt = sprintf(['Clean cluster0 before: %d\n' ...
+        'Clean reassigned: %d\n' ...
+        'Clean cluster0 after: %d\n' ...
+        'Dirty assigned: %d\n' ...
+        'Dirty unassigned: %d\n' ...
+        'Dirty threshold: %.2f SD'], ...
+        n_clean_unassigned_before, n_clean_reassigned, n_clean_unassigned_after, ...
+        n_dirty_assigned, n_dirty_unassigned, dirty_threshold_sd);
+    text(ax4, 0.02, 0.98, txt, 'Units', 'normalized', ...
+        'VerticalAlignment', 'top', 'FontName', 'Consolas', 'FontSize', 10);
+
+    saveas(fig, png_file);
+    close(fig);
 end
 
 function f = pick_first_existing(candidates)

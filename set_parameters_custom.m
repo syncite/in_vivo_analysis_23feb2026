@@ -36,10 +36,9 @@ par.sr = 40000;
 %% DETECTION PARAMETERS
 % stdmin is the critical parameter for catching low-amplitude units.
 % Default (5) misses L2/3 pyramidals whose spikes sit at 3.5-4.5x noise.
-% 4 is a good balance — more noise crossings reach the clustering stage
-% but end up in cluster 0. Go to 3.5 if you're still missing units and
-% can tolerate longer sorting sessions.
-par.stdmin = 4;
+% 4.5 is more selective: fewer marginal events proceed to clustering.
+% Drop to 4 only if you are missing obvious single units.
+par.stdmin = 4.5;
 par.stdmax = 50;
 
 % Detection polarity. Use negative-only to target canonical extracellular
@@ -85,9 +84,9 @@ par.KNearNeighb = 11;
 
 % Minimum cluster size. Default (60) is too aggressive for sparse neurons.
 % At 0.1 Hz over 45 min = ~270 spikes total. With Inf segment length,
-% all 270 are available for clustering. 20 is a reasonable floor — any
-% fewer and you can't meaningfully estimate a waveform template.
-par.min_clus = 20;
+% all 270 are available for clustering. 30 is stricter and reduces small
+% borderline clusters.
+par.min_clus = 30;
 
 par.randomseed = 0;                  % clock-based random seed
 par.temp_plot = 'log';
@@ -109,15 +108,14 @@ par.features = 'wav';                % wavelets (better than PCA for
                                      % non-stationary waveform shapes)
 
 %% FORCE MEMBERSHIP (template matching)
-% After initial SPC clustering, unassigned spikes are force-assigned to
-% the nearest cluster. This recovers spikes that fell outside the SPC
-% temperature regime — important for sparse units where every spike counts.
-par.template_sdnum = 3;              % max radius in std devs
+% For selective clustering, keep automatic force-assignment OFF so
+% ambiguous events remain in cluster 0 for manual review.
+par.template_sdnum = 2.5;            % stricter assignment radius
 par.template_k = 10;
 par.template_k_min = 10;
 par.template_type = 'center';        % distance to cluster center
 par.force_feature = 'spk';           % match on full spike shape
-par.force_auto = true;               % auto-force in batch mode
+par.force_auto = false;              % keep ambiguous spikes in cluster 0
 
 %% TEMPLATE MATCHING
 % For recordings with >40k detected events, template matching kicks in

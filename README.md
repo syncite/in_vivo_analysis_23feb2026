@@ -60,8 +60,14 @@ Per channel, it writes:
 Masking rule:
 - from LED onset to `100 ms after LED offset`
 - default is `1.0 s + 0.1 s = 1.1 s` per LED event
+- default time reference is `index_ms+firstAD` (consistent across channels)
 
-## 5) First manual curation in wave_clus GUI
+## 5) Review clusters first, then curate only if needed
+
+After step 4, first review the wave_clus output figures (for example `fig2print` files in the channel folder).
+If clusters already look good, you can skip GUI edits and continue to step 6.
+
+If you want manual edits:
 
 ```matlab
 wave_clus
@@ -76,15 +82,23 @@ Why this is clean-only:
 - clustering was run from `*_clean_spikes.mat`
 - that clean result is copied to canonical `times_channel_<N>_filtered_CAR.mat` for GUI compatibility
 
-## 6) Assign LED-period spikes back to curated templates
+## 6) Reassign remaining clean + dirty spikes to curated templates
 
-Default threshold is 3 SD normalized distance.
+By default, step 6 will:
+- reassign clean spikes still in cluster 0 using curated clean templates
+- assign dirty spikes using the same template set
+- leave spikes as 0 if they fail threshold
+- save a step-2 PNG summary (`*_assignment_summary.png`)
+
+These defaults are hard-coded in the script:
+- time reference: `index_ms+firstAD`
+- clean cluster-0 reassignment: ON
+- clean threshold: `2.5 SD`
+- dirty threshold: `2.5 SD`
+- assignment PNG output: ON
 
 ```matlab
-waveclus_opto_artifact_free(master, ...
-    'mode', 'assign', ...
-    'distance_threshold_sd', 3, ...
-    'overwrite_main_times', true);
+waveclus_opto_artifact_free(master, 'mode', 'assign');
 ```
 
 With `overwrite_main_times = true`, the canonical `times_channel_<N>_filtered_CAR.mat` is replaced with combined clean+assigned output (and a clean-only backup is saved).
@@ -109,7 +123,7 @@ visualise_waveform(master);
 - Run order is:
   1) `extract_and_filter`
   2) `waveclus_opto_artifact_free(..., 'mode', 'prepare')`
-  3) wave_clus manual curation
+  3) optional wave_clus manual curation
   4) `waveclus_opto_artifact_free(..., 'mode', 'assign')`
   5) optional wave_clus recuration
   6) `analyse_peri_event` / `visualise_waveform`
