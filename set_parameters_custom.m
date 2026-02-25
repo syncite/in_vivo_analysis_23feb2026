@@ -42,22 +42,20 @@ par.sr = 40000;
 par.stdmin = 4;
 par.stdmax = 50;
 
-% Detection polarity. 'both' catches units regardless of which phase
-% crosses threshold first. Costs ~2x detection time but important if
-% your electrode orientation varies across channels.
-par.detection = 'both';
+% Detection polarity. Use negative-only to target canonical extracellular
+% trough-first spikes and avoid positive-threshold detections.
+par.detection = 'neg';
 
 % Refractory period. 1.5 ms is fine for cortical neurons (absolute
 % refractory ~1 ms). Don't go lower or you'll get double-detections
 % from ringing.
 par.ref_ms = 1.5;
 
-% Spike window. At 40 kHz, w_pre=20 = 0.5 ms before peak, w_post=44 =
-% 1.1 ms after. This captures the full repolarization of pyramidal cells
-% which matters for half-width and trough-to-peak classification.
-% 60 samples total at 40 kHz = 1.5 ms window. Increase w_post to 60 if
-% you see clipped repolarizations on wide-waveform units.
-par.w_pre = 20;
+% Spike window. At 40 kHz, w_pre=30 = 0.75 ms before peak, w_post=60 =
+% 1.5 ms after. This keeps more pre-trough context while retaining full
+% repolarization for waveform metrics.
+% 90 samples total at 40 kHz = 2.25 ms window.
+par.w_pre = 30;
 par.w_post = 60;                     % increased from 44 for full pyramidal
                                      % repolarisation at 40 kHz
 par.alignment_window = 10;
