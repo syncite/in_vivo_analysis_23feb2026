@@ -146,6 +146,8 @@ function run_prepare(master, channelDir, channels, led_windows, opts)
         fprintf('\n[prepare] Channel %d\n', ch);
         fprintf('  Input: %s\n', chFile);
 
+        ensure_sr_in_mat_file(chFile, sr, opts.debug);
+
         if opts.debug
             chDir = fileparts(chFile);
             fprintf('  [debug] MATLAB pwd before Get_spikes: %s\n', pwd);
@@ -172,6 +174,10 @@ function run_prepare(master, channelDir, channels, led_windows, opts)
         if ~isfield(fullData, 'spikes')
             error('Spike file missing ''spikes'': %s', spkFileFull);
         end
+        if ~isfield(fullData, 'sr')
+            ensure_sr_in_mat_file(spkFileFull, sr, opts.debug);
+            fullData.sr = sr;
+        end
         [index_raw, index_field] = get_index_field(fullData, spkFileFull);
 
         first_sample_s = get_first_sample_seconds(master, ch);
@@ -196,6 +202,8 @@ function run_prepare(master, channelDir, channels, led_windows, opts)
 
         cleanData = subset_spike_struct(fullData, clean_mask, n_total);
         dirtyData = subset_spike_struct(fullData, dirty_mask, n_total);
+        cleanData.sr = sr;
+        dirtyData.sr = sr;
 
         save(spkFileClean, '-struct', 'cleanData', '-v7.3');
         save(spkFileDirty, '-struct', 'dirtyData', '-v7.3');
@@ -231,15 +239,28 @@ function run_prepare(master, channelDir, channels, led_windows, opts)
         fprintf('  Saved split metadata: %s\n', splitFile);
 
         if opts.run_clustering
-            run_do_clustering(spkFileClean, opts.par);
-            tFileClean = times_file_from_spike_file(spkFileClean);
+            run_do_clustering(spkFileClean, opts.par, opts.debug);
+            tFileCleanExpected = times_file_from_spike_file(spkFileClean);
+            tFileClean = resolve_times_file_after_do_clustering(spkFileClean);
+            if ~isempty(tFileClean) && ~strcmpi(tFileClean, tFileCleanExpected)
+                copyfile(tFileClean, tFileCleanExpected);
+                if opts.debug
+                    fprintf('  [debug] Non-canonical times file copied to expected name:\n');
+                    fprintf('    source: %s\n', tFileClean);
+                    fprintf('    target: %s\n', tFileCleanExpected);
+                end
+                tFileClean = tFileCleanExpected;
+            elseif isempty(tFileClean)
+                tFileClean = '';
+            end
+
             tFileMain = times_file_from_spike_file(spkFileFull);
             if exist(tFileClean, 'file')
                 copyfile(tFileClean, tFileMain);
                 fprintf('  Clean clustering file: %s\n', tFileClean);
                 fprintf('  Main times file for GUI: %s\n', tFileMain);
             else
-                warning('Do_clustering finished but expected times file not found: %s', tFileClean);
+                warning('Do_clustering finished but expected times file not found: %s', tFileCleanExpected);
             end
         end
     end
@@ -525,6 +546,27 @@ function [master, masterPath, masterName] = load_master(masterFile)
     [masterPath, masterName, ~] = fileparts(masterFile);
 end
 
+function ensure_sr_in_mat_file(matFile, sr, debug_mode)
+    if nargin < 3
+        debug_mode = false;
+    end
+    if isempty(sr) || ~isfinite(sr) || sr <= 0 || ~exist(matFile, 'file')
+        return;
+    end
+
+    info = whos('-file', matFile);
+    names = {info.name};
+    if ismember('sr', names)
+        return;
+    end
+
+    tmp = struct('sr', double(sr));
+    save(matFile, '-struct', 'tmp', '-append');
+    if debug_mode
+        fprintf('  [debug] Added sr=%g to %s\n', sr, matFile);
+    end
+end
+
 function channelDir = resolve_channel_dir(masterPath, masterName)
     c1 = fullfile(masterPath, [masterName '_channels']);
     c2 = fullfile(masterPath, masterName);
@@ -717,48 +759,109 @@ function tFile = times_file_from_spike_file(spkFile)
     tFile = fullfile(d, ['times_' base '.mat']);
 end
 
+function tFile = resolve_times_file_after_do_clustering(spkFile)
+    expected = times_file_from_spike_file(spkFile);
+    if exist(expected, 'file')
+        tFile = expected;
+        return;
+    end
+
+    [d, n, ~] = fileparts(spkFile);
+    base_no_spikes = regexprep(n, '_spikes.*$', '');
+    ch_token = regexp(base_no_spikes, 'channel_\d+', 'match', 'once');
+    if isempty(ch_token)
+        ch_token = base_no_spikes;
+    end
+
+    patterns = {
+        ['times_' n '.mat']
+        ['times_' n '*.mat']
+        ['times_' base_no_spikes '.mat']
+        ['times_' base_no_spikes '*.mat']
+        ['times_*' ch_token '*.mat']
+    };
+
+    cand = {};
+    for i = 1:numel(patterns)
+        a = dir(fullfile(d, patterns{i}));
+        b = dir(fullfile(pwd, patterns{i}));
+        cand = [cand; to_paths(a, d); to_paths(b, pwd)]; %#ok<AGROW>
+    end
+    cand = unique(cand, 'stable');
+
+    if isempty(cand)
+        tFile = '';
+        return;
+    end
+
+    chosen = cand{1};
+    chosen_time = get_mtime(chosen);
+    for i = 2:numel(cand)
+        t = get_mtime(cand{i});
+        if t > chosen_time
+            chosen = cand{i};
+            chosen_time = t;
+        end
+    end
+    tFile = chosen;
+end
+
 function run_get_spikes(chFile, par, debug_mode)
     if nargin < 3
         debug_mode = false;
     end
 
+    [chDir, chName, chExt] = fileparts(chFile);
+    if isempty(chDir), chDir = pwd; end
+    chBase = [chName chExt];
+    oldDir = pwd;
+    c = onCleanup(@() cd(oldDir)); %#ok<NASGU>
+    cd(chDir);
+
     if isempty(par)
         if debug_mode
-            fprintf('  [debug] Get_spikes call: Get_spikes({chFile})\n');
+            fprintf('  [debug] Get_spikes call (cwd=%s): Get_spikes({%s})\n', chDir, chBase);
         end
-        Get_spikes({chFile});
+        Get_spikes({chBase});
     else
         par_runtime = par;
         if isfield(par_runtime, 'cont_segment')
             par_runtime.cont_segment = false;
         end
+        if isfield(par_runtime, 'segments_length') && (~isfinite(par_runtime.segments_length) || par_runtime.segments_length > 1e6)
+            par_runtime.segments_length = 5;
+        end
 
         try
             if debug_mode
-                fprintf('  [debug] Get_spikes call: Get_spikes({chFile}, ''par'', par_runtime)\n');
+                fprintf('  [debug] Get_spikes call (cwd=%s): Get_spikes({%s}, ''par'', par_runtime)\n', chDir, chBase);
             end
-            Get_spikes({chFile}, 'par', par_runtime);
+            Get_spikes({chBase}, 'par', par_runtime);
         catch ME1
-            warning(['Get_spikes first attempt failed (%s). ' ...
-                'Retrying with single-file call style.'], ME1.message);
+            if debug_mode
+                warning(['Get_spikes first attempt failed (%s). ' ...
+                    'Retrying with single-file call style.'], ME1.message);
+            end
             try
                 if debug_mode
-                    fprintf('  [debug] Get_spikes retry: Get_spikes(chFile, ''par'', par_runtime)\n');
+                    fprintf('  [debug] Get_spikes retry: Get_spikes(%s, ''par'', par_runtime)\n', chBase);
                 end
-                Get_spikes(chFile, 'par', par_runtime);
+                Get_spikes(chBase, 'par', par_runtime);
             catch ME2
                 if contains(ME2.message, 'raw data is already fully loaded', 'IgnoreCase', true)
-                    warning(['Get_spikes failed due to segmented-read mode on fully loaded data. ' ...
-                        'Retrying once with finite segment length for compatibility.']);
+                    if debug_mode
+                        warning(['Get_spikes failed due to segmented-read mode on fully loaded data. ' ...
+                            'Retrying once with finite segment length for compatibility.']);
+                    end
                     par_retry = par_runtime;
                     if isfield(par_retry, 'segments_length') && (~isfinite(par_retry.segments_length) || par_retry.segments_length > 1e6)
                         par_retry.segments_length = 5;
                     end
                     if debug_mode
                         fprintf('  [debug] Get_spikes retry2: segments_length=%g\n', par_retry.segments_length);
-                        fprintf('  [debug] Get_spikes retry2 call: Get_spikes(chFile, ''par'', par_retry)\n');
+                        fprintf('  [debug] Get_spikes retry2 call: Get_spikes(%s, ''par'', par_retry)\n', chBase);
                     end
-                    Get_spikes(chFile, 'par', par_retry);
+                    Get_spikes(chBase, 'par', par_retry);
                 else
                     rethrow(ME2);
                 end
@@ -788,11 +891,32 @@ function print_spike_file_listing(dirPath, phase_label)
     end
 end
 
-function run_do_clustering(spkFile, par)
+function run_do_clustering(spkFile, par, debug_mode)
+    if nargin < 3
+        debug_mode = false;
+    end
+
+    [spkDir, spkName, spkExt] = fileparts(spkFile);
+    if isempty(spkDir), spkDir = pwd; end
+    spkBase = [spkName spkExt];
+    oldDir = pwd;
+    c = onCleanup(@() cd(oldDir)); %#ok<NASGU>
+    cd(spkDir);
+
+    if debug_mode
+        fprintf('  [debug] Do_clustering call (cwd=%s): %s\n', spkDir, spkBase);
+    end
+
+    % Some wave_clus Windows builds emit this non-actionable warning due
+    % backslash handling in sprintf format strings.
+    ws = warning('query', 'MATLAB:dispatcher:invalidEscapeSequence');
+    wc = onCleanup(@() warning(ws.state, 'MATLAB:dispatcher:invalidEscapeSequence')); %#ok<NASGU>
+    warning('off', 'MATLAB:dispatcher:invalidEscapeSequence');
+
     if isempty(par)
-        Do_clustering(spkFile);
+        Do_clustering(spkBase);
     else
-        Do_clustering(spkFile, 'par', par);
+        Do_clustering(spkBase, 'par', par);
     end
 end
 
