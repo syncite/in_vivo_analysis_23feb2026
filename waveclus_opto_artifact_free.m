@@ -489,8 +489,14 @@ function [master, masterPath, masterName] = load_master(masterFile)
     if ~exist(masterFile, 'file')
         error('Master file not found: %s', masterFile);
     end
-    master = load(masterFile, 'Eventstime', 'EventTag', 'nChannels', ...
-        'FsPlexon', 'firstADsamples', 'firstADsample');
+    info = whos('-file', masterFile);
+    names = {info.name};
+
+    required_vars = {'Eventstime', 'EventTag', 'nChannels', 'FsPlexon'};
+    optional_vars = {'firstADsamples', 'firstADsample'};
+    load_vars = [required_vars, optional_vars(ismember(optional_vars, names))];
+
+    master = load(masterFile, load_vars{:});
     if ~isfield(master, 'Eventstime') || ~isfield(master, 'EventTag')
         error('Master file missing Eventstime/EventTag: %s', masterFile);
     end
@@ -615,7 +621,32 @@ function run_get_spikes(chFile, par)
     if isempty(par)
         Get_spikes({chFile});
     else
-        Get_spikes({chFile}, 'par', par);
+        par_runtime = par;
+        if isfield(par_runtime, 'cont_segment')
+            par_runtime.cont_segment = false;
+        end
+
+        try
+            Get_spikes({chFile}, 'par', par_runtime);
+        catch ME1
+            warning(['Get_spikes first attempt failed (%s). ' ...
+                'Retrying with single-file call style.'], ME1.message);
+            try
+                Get_spikes(chFile, 'par', par_runtime);
+            catch ME2
+                if contains(ME2.message, 'raw data is already fully loaded', 'IgnoreCase', true)
+                    warning(['Get_spikes failed due to segmented-read mode on fully loaded data. ' ...
+                        'Retrying once with finite segment length for compatibility.']);
+                    par_retry = par_runtime;
+                    if isfield(par_retry, 'segments_length') && (~isfinite(par_retry.segments_length) || par_retry.segments_length > 1e6)
+                        par_retry.segments_length = 5;
+                    end
+                    Get_spikes(chFile, 'par', par_retry);
+                else
+                    rethrow(ME2);
+                end
+            end
+        end
     end
 end
 
