@@ -53,8 +53,8 @@ waveclus_opto_artifact_free(master, 'mode', 'prepare');
 
 Per channel, it writes:
 - `channel_<N>_filtered_CAR_spikes.mat` (full spikes)
-- `channel_<N>_filtered_CAR_spikes_clean.mat` (clean-only spikes)
-- `channel_<N>_filtered_CAR_spikes_dirty.mat` (dirty-only spikes)
+- `channel_<N>_filtered_CAR_clean_spikes.mat` (clean-only spikes)
+- `channel_<N>_filtered_CAR_dirty_spikes.mat` (dirty-only spikes)
 - `channel_<N>_filtered_CAR_led_split.mat` (metadata + masks)
 
 Masking rule:
@@ -73,7 +73,7 @@ In the GUI:
 - Save results
 
 Why this is clean-only:
-- clustering was run from `*_spikes_clean.mat`
+- clustering was run from `*_clean_spikes.mat`
 - that clean result is copied to canonical `times_channel_<N>_filtered_CAR.mat` for GUI compatibility
 
 ## 6) Assign LED-period spikes back to curated templates

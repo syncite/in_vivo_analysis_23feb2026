@@ -10,7 +10,7 @@ function waveclus_opto_artifact_free(master_mat_file, varargin)
 %   1) 'prepare' (default)
 %      - Detect spikes on full channel trace (Get_spikes)
 %      - Split spikes into clean vs dirty using LED windows
-%      - Save explicit *_spikes_clean.mat and *_spikes_dirty.mat files
+%      - Save explicit *_clean_spikes.mat and *_dirty_spikes.mat files
 %      - Run Do_clustering on clean spikes
 %
 %   2) 'assign'
@@ -37,8 +37,8 @@ function waveclus_opto_artifact_free(master_mat_file, varargin)
 %
 % Files created per channel:
 %   channel_<N>_..._spikes.mat       - full spikes (from Get_spikes)
-%   channel_<N>_..._spikes_clean.mat - clean-only spikes
-%   channel_<N>_..._spikes_dirty.mat - dirty-only spikes
+%   channel_<N>_..._clean_spikes.mat - clean-only spikes
+%   channel_<N>_..._dirty_spikes.mat - dirty-only spikes
 %   channel_<N>_..._led_split.mat    - masks + metadata
 %   times_..._with_led_assignments.mat (assign mode)
 %   times_..._clean_only.mat (backup of curated clean file if overwritten)
@@ -196,8 +196,8 @@ function run_prepare(master, channelDir, channels, led_windows, opts)
             warning('Channel %d has only %d clean spikes; clustering may fail.', ch, n_clean);
         end
 
-        spkFileClean = strrep(spkFileFull, '_spikes.mat', '_spikes_clean.mat');
-        spkFileDirty = strrep(spkFileFull, '_spikes.mat', '_spikes_dirty.mat');
+        spkFileClean = strrep(spkFileFull, '_spikes.mat', '_clean_spikes.mat');
+        spkFileDirty = strrep(spkFileFull, '_spikes.mat', '_dirty_spikes.mat');
         splitFile = strrep(spkFileFull, '_spikes.mat', '_led_split.mat');
 
         cleanData = subset_spike_struct(fullData, clean_mask, n_total);
@@ -293,13 +293,25 @@ function run_assign(master, channelDir, channels, opts)
         if isfield(split, 'spike_file_clean')
             spkFileClean = split.spike_file_clean;
         else
-            spkFileClean = strrep(spkFile, '_spikes.mat', '_spikes_clean.mat');
+            spkFileClean = strrep(spkFile, '_spikes.mat', '_clean_spikes.mat');
+            if ~exist(spkFileClean, 'file')
+                legacy = strrep(spkFile, '_spikes.mat', '_spikes_clean.mat');
+                if exist(legacy, 'file')
+                    spkFileClean = legacy;
+                end
+            end
         end
 
         if isfield(split, 'spike_file_dirty')
             spkFileDirty = split.spike_file_dirty;
         else
-            spkFileDirty = strrep(spkFile, '_spikes.mat', '_spikes_dirty.mat');
+            spkFileDirty = strrep(spkFile, '_spikes.mat', '_dirty_spikes.mat');
+            if ~exist(spkFileDirty, 'file')
+                legacy = strrep(spkFile, '_spikes.mat', '_spikes_dirty.mat');
+                if exist(legacy, 'file')
+                    spkFileDirty = legacy;
+                end
+            end
         end
 
         if isempty(spkFileFull) || ~exist(spkFileFull, 'file')
