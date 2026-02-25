@@ -33,6 +33,7 @@ function waveclus_opto_artifact_free(master_mat_file, varargin)
 %   'distance_threshold_sd' : dirty assignment threshold        3
 %   'overwrite_main_times'  : in assign mode, replace times_*.mat [true]
 %   'run_clustering'        : in prepare mode, run Do_clustering [true]
+%   'debug'                 : print Get_spikes path diagnostics [false]
 %
 % Files created per channel:
 %   channel_<N>_..._spikes.mat       - full spikes (from Get_spikes)
@@ -53,6 +54,7 @@ function waveclus_opto_artifact_free(master_mat_file, varargin)
     addParameter(p, 'distance_threshold_sd', 3, @(x) isnumeric(x) && isscalar(x) && x > 0);
     addParameter(p, 'overwrite_main_times', true, @islogical);
     addParameter(p, 'run_clustering', true, @islogical);
+    addParameter(p, 'debug', false, @islogical);
     parse(p, master_mat_file, varargin{:});
     opts = p.Results;
 
@@ -144,11 +146,27 @@ function run_prepare(master, channelDir, channels, led_windows, opts)
         fprintf('\n[prepare] Channel %d\n', ch);
         fprintf('  Input: %s\n', chFile);
 
-        run_get_spikes(chFile, opts.par);
-        spkFileFull = spike_file_from_channel_file(chFile);
-        if ~exist(spkFileFull, 'file')
-            error('Expected spike file not found: %s', spkFileFull);
+        if opts.debug
+            chDir = fileparts(chFile);
+            fprintf('  [debug] MATLAB pwd before Get_spikes: %s\n', pwd);
+            fprintf('  [debug] Channel file dir: %s\n', chDir);
+            print_spike_file_listing(chDir, 'before');
+            if ~strcmpi(chDir, pwd)
+                print_spike_file_listing(pwd, 'before');
+            end
         end
+
+        run_get_spikes(chFile, opts.par, opts.debug);
+
+        if opts.debug
+            chDir = fileparts(chFile);
+            fprintf('  [debug] MATLAB pwd after Get_spikes: %s\n', pwd);
+            print_spike_file_listing(chDir, 'after');
+            if ~strcmpi(chDir, pwd)
+                print_spike_file_listing(pwd, 'after');
+            end
+        end
+        spkFileFull = resolve_spike_file_after_get_spikes(chFile);
 
         fullData = load(spkFileFull);
         if ~isfield(fullData, 'spikes')
@@ -607,6 +625,88 @@ function spkFile = spike_file_from_channel_file(chFile)
     spkFile = fullfile(d, [n '_spikes.mat']);
 end
 
+function spkFile = resolve_spike_file_after_get_spikes(chFile)
+    expected = spike_file_from_channel_file(chFile);
+    if exist(expected, 'file')
+        spkFile = expected;
+        return;
+    end
+
+    [d, n, ~] = fileparts(chFile);
+    patterns = {
+        [n '_spikes.mat']
+        [n '*_spikes.mat']
+        [n '*spikes*.mat']
+    };
+
+    cand = {};
+    for i = 1:numel(patterns)
+        a = dir(fullfile(d, patterns{i}));
+        b = dir(fullfile(pwd, patterns{i}));
+        cand = [cand; to_paths(a, d); to_paths(b, pwd)]; %#ok<AGROW>
+    end
+    cand = unique(cand, 'stable');
+
+    if isempty(cand)
+        list_d = dir(fullfile(d, '*.mat'));
+        preview = strjoin({list_d.name}, ', ');
+        if numel(preview) > 300
+            preview = [preview(1:300) ' ...'];
+        end
+        error(['Expected spike file not found after Get_spikes.\n' ...
+            'Expected: %s\nDirectory scanned: %s\nFound MAT files: %s'], ...
+            expected, d, preview);
+    end
+
+    % Choose the most recently modified candidate.
+    chosen = cand{1};
+    chosen_time = get_mtime(chosen);
+    for i = 2:numel(cand)
+        t = get_mtime(cand{i});
+        if t > chosen_time
+            chosen = cand{i};
+            chosen_time = t;
+        end
+    end
+
+    if ~strcmpi(chosen, expected)
+        try
+            copyfile(chosen, expected);
+            fprintf('  Found non-canonical spikes file, copied to expected name:\n');
+            fprintf('    source: %s\n', chosen);
+            fprintf('    target: %s\n', expected);
+            spkFile = expected;
+            return;
+        catch
+            warning('Using non-canonical spike file path: %s', chosen);
+            spkFile = chosen;
+            return;
+        end
+    end
+
+    spkFile = chosen;
+end
+
+function paths = to_paths(dir_struct, root_dir)
+    if isempty(dir_struct)
+        paths = {};
+        return;
+    end
+    paths = cell(numel(dir_struct), 1);
+    for i = 1:numel(dir_struct)
+        paths{i} = fullfile(root_dir, dir_struct(i).name);
+    end
+end
+
+function t = get_mtime(f)
+    d = dir(f);
+    if isempty(d)
+        t = -inf;
+    else
+        t = d(1).datenum;
+    end
+end
+
 function tFile = times_file_from_spike_file(spkFile)
     [d, n, ~] = fileparts(spkFile);
     if endsWith(n, '_spikes')
@@ -617,8 +717,15 @@ function tFile = times_file_from_spike_file(spkFile)
     tFile = fullfile(d, ['times_' base '.mat']);
 end
 
-function run_get_spikes(chFile, par)
+function run_get_spikes(chFile, par, debug_mode)
+    if nargin < 3
+        debug_mode = false;
+    end
+
     if isempty(par)
+        if debug_mode
+            fprintf('  [debug] Get_spikes call: Get_spikes({chFile})\n');
+        end
         Get_spikes({chFile});
     else
         par_runtime = par;
@@ -627,11 +734,17 @@ function run_get_spikes(chFile, par)
         end
 
         try
+            if debug_mode
+                fprintf('  [debug] Get_spikes call: Get_spikes({chFile}, ''par'', par_runtime)\n');
+            end
             Get_spikes({chFile}, 'par', par_runtime);
         catch ME1
             warning(['Get_spikes first attempt failed (%s). ' ...
                 'Retrying with single-file call style.'], ME1.message);
             try
+                if debug_mode
+                    fprintf('  [debug] Get_spikes retry: Get_spikes(chFile, ''par'', par_runtime)\n');
+                end
                 Get_spikes(chFile, 'par', par_runtime);
             catch ME2
                 if contains(ME2.message, 'raw data is already fully loaded', 'IgnoreCase', true)
@@ -641,12 +754,37 @@ function run_get_spikes(chFile, par)
                     if isfield(par_retry, 'segments_length') && (~isfinite(par_retry.segments_length) || par_retry.segments_length > 1e6)
                         par_retry.segments_length = 5;
                     end
+                    if debug_mode
+                        fprintf('  [debug] Get_spikes retry2: segments_length=%g\n', par_retry.segments_length);
+                        fprintf('  [debug] Get_spikes retry2 call: Get_spikes(chFile, ''par'', par_retry)\n');
+                    end
                     Get_spikes(chFile, 'par', par_retry);
                 else
                     rethrow(ME2);
                 end
             end
         end
+    end
+end
+
+function print_spike_file_listing(dirPath, phase_label)
+    if ~exist(dirPath, 'dir')
+        fprintf('  [debug] (%s) dir missing: %s\n', phase_label, dirPath);
+        return;
+    end
+
+    L = dir(fullfile(dirPath, '*spikes*.mat'));
+    if isempty(L)
+        fprintf('  [debug] (%s) no *spikes*.mat in %s\n', phase_label, dirPath);
+        return;
+    end
+
+    fprintf('  [debug] (%s) spikes files in %s:\n', phase_label, dirPath);
+    [~, order] = sort([L.datenum], 'descend');
+    L = L(order);
+    nShow = min(numel(L), 8);
+    for i = 1:nShow
+        fprintf('    %s | %s\n', datestr(L(i).datenum, 'yyyy-mm-dd HH:MM:SS'), L(i).name);
     end
 end
 
