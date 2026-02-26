@@ -7,6 +7,9 @@ This is a step-by-step protocol for running your full analysis pipeline, includi
 - LED-period spike assignment
 - downstream peri-event and waveform analysis
 
+Pipeline summary (3 sentences):
+This pipeline detects spikes on the full recording, masks LED-contaminated periods (LED onset to offset + 100 ms), and builds clean templates from LED-OFF spikes only. Clean-template generation uses wave_clus clustering on clean spikes (wavelet-feature extraction + SPC clustering, followed by optional manual GUI curation). Remaining non-template spikes (dirty spikes plus optional clean cluster-0 spikes) are then assigned in one pass with wave_clus-style force membership template matching (`template_type` logic such as center/nn/ml/mahal, typically spike-waveform features with an SD-radius threshold).
+
 Scripts used:
 - `extract_and_filter.m`
 - `waveclus_opto_artifact_free.m`

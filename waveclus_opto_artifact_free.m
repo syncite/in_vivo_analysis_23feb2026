@@ -15,7 +15,8 @@ function waveclus_opto_artifact_free(master_mat_file, varargin)
 %
 %   2) 'assign'
 %      - Load manually curated clean-only times_*.mat
-%      - Assign dirty spikes by normalized template distance
+%      - Assign non-template spikes using wave_clus-style force membership
+%        (template_type / template_sdnum / template_k / template_k_min)
 %      - Write combined output and (optionally) overwrite canonical times file
 %
 % Usage:
@@ -494,20 +495,36 @@ function run_assign(master, channelDir, channels, opts)
         clean_labels_for_templates = clean_labels;
         clean_reassigned_labels = zeros(size(clean_labels));
         clean_reassigned_best_dist = inf(size(clean_labels));
-
+        clean_unassigned_mask = false(size(clean_labels));
         if opts.assign_unlabeled_clean
             clean_unassigned_mask = clean_labels == 0;
-            if any(clean_unassigned_mask)
-                [labels_tmp, d_tmp, ~] = assign_spikes_to_templates( ...
-                    clean_spikes, clean_labels, ...
-                    clean_spikes(clean_unassigned_mask, :), ...
-                    opts.clean_distance_threshold_sd);
-                idx_unassigned = find(clean_unassigned_mask);
-                clean_reassigned_labels(idx_unassigned) = labels_tmp;
-                clean_reassigned_best_dist(idx_unassigned) = d_tmp;
-                clean_labels_for_templates(idx_unassigned) = labels_tmp;
-            end
         end
+
+        % Assign all non-template spikes equally in one pass:
+        %   targets = [clean cluster-0 (optional); dirty spikes]
+        % using the same curated clean templates and one threshold.
+        n_clean_targets = sum(clean_unassigned_mask);
+        target_spikes = [clean_spikes(clean_unassigned_mask, :); dirty_spikes];
+        unified_thr = opts.distance_threshold_sd;
+        if opts.assign_unlabeled_clean && abs(opts.clean_distance_threshold_sd - opts.distance_threshold_sd) > 1e-9
+            warning(['Channel %d: using unified threshold %.2f SD for all non-template spikes ' ...
+                '(clean/dirty), ignoring separate clean threshold %.2f SD.'], ...
+                ch, unified_thr, opts.clean_distance_threshold_sd);
+        end
+        force_par = resolve_force_params(timesData, unified_thr);
+
+        [target_labels_all, target_dist_all, template_stats, force_used] = ...
+            assign_spikes_waveclus_force(clean_spikes, clean_labels, target_spikes, force_par);
+
+        if n_clean_targets > 0
+            idx_unassigned = find(clean_unassigned_mask);
+            clean_reassigned_labels(idx_unassigned) = target_labels_all(1:n_clean_targets);
+            clean_reassigned_best_dist(idx_unassigned) = target_dist_all(1:n_clean_targets);
+            clean_labels_for_templates(idx_unassigned) = target_labels_all(1:n_clean_targets);
+        end
+
+        dirty_labels = target_labels_all((n_clean_targets + 1):end);
+        dirty_best_dist = target_dist_all((n_clean_targets + 1):end);
 
         cc_clean_reassigned = cc;
         n_cc_clean_reassigned = 0;
@@ -519,9 +536,6 @@ function run_assign(master, channelDir, channels, opts)
             end
         end
         n_clean_unassigned_after = sum(clean_labels_for_templates == 0);
-
-        [dirty_labels, dirty_best_dist, template_stats] = assign_spikes_to_templates( ...
-            clean_spikes, clean_labels_for_templates, dirty_spikes, opts.distance_threshold_sd);
 
         dirty_time_ms = transform_index_to_ms(double(dirty_index), sr, first_sample_s, mode_id);
         dirty_cc = [double(dirty_labels(:)) double(dirty_time_ms(:))];
@@ -560,7 +574,12 @@ function run_assign(master, channelDir, channels, opts)
         led_assign_info.distance_threshold_sd = opts.distance_threshold_sd;
         led_assign_info.assign_unlabeled_clean = opts.assign_unlabeled_clean;
         led_assign_info.clean_distance_threshold_sd = opts.clean_distance_threshold_sd;
-        led_assign_info.template_mode = 'normalized_waveform_distance';
+        led_assign_info.template_mode = 'wave_clus_force_membership';
+        led_assign_info.force_template_type = force_used.template_type;
+        led_assign_info.force_feature = force_used.force_feature;
+        led_assign_info.force_template_sdnum = force_used.template_sdnum;
+        led_assign_info.force_template_k = force_used.template_k;
+        led_assign_info.force_template_k_min = force_used.template_k_min;
         led_assign_info.time_transform_mode = mode_label;
         led_assign_info.cc_match_count = n_match;
         led_assign_info.cc_total = size(cc,1);
@@ -612,6 +631,7 @@ function run_assign(master, channelDir, channels, opts)
         assignment_report.clean_reassigned_labels = clean_reassigned_labels(:);
         assignment_report.clean_reassigned_best_distance = clean_reassigned_best_dist(:);
         assignment_report.template_stats = template_stats;
+        assignment_report.force_used = force_used;
         save(reportFile, 'assignment_report');
 
         if opts.save_assignment_png
@@ -1218,40 +1238,324 @@ function time_ms = transform_index_to_ms(index_raw, sr, first_sample_s, mode_id)
     end
 end
 
-function [target_labels, target_best_dist, template_stats] = assign_spikes_to_templates( ...
-    template_spikes, template_labels, target_spikes, threshold_sd)
+function force_par = resolve_force_params(timesData, template_sdnum)
+    force_par = struct();
 
+    if isfield(timesData, 'par') && isstruct(timesData.par)
+        src = timesData.par;
+    else
+        src = [];
+        if exist('set_parameters_custom', 'file') == 2
+            src = set_parameters_custom();
+        elseif exist('set_parameters', 'file') == 2
+            src = set_parameters();
+        end
+    end
+
+    if isempty(src), src = struct(); end
+
+    force_par.template_type = get_struct_field_or_default(src, 'template_type', 'center');
+    force_par.template_k = get_struct_field_or_default(src, 'template_k', 10);
+    force_par.template_k_min = get_struct_field_or_default(src, 'template_k_min', 10);
+    force_par.force_feature = get_struct_field_or_default(src, 'force_feature', 'spk');
+    force_par.features = get_struct_field_or_default(src, 'features', 'wav');
+    force_par.scales = get_struct_field_or_default(src, 'scales', 4);
+    force_par.min_inputs = get_struct_field_or_default(src, 'min_inputs', 10);
+    force_par.max_inputs = get_struct_field_or_default(src, 'max_inputs', 0.75);
+
+    force_par.template_type = lower(strtrim(char(force_par.template_type)));
+    force_par.force_feature = lower(strtrim(char(force_par.force_feature)));
+    if ~ismember(force_par.template_type, {'nn', 'center', 'ml', 'mahal'})
+        warning('Unknown template_type "%s"; using center.', force_par.template_type);
+        force_par.template_type = 'center';
+    end
+    if ~ismember(force_par.force_feature, {'spk', 'wav'})
+        warning('Unknown force_feature "%s"; using spk.', force_par.force_feature);
+        force_par.force_feature = 'spk';
+    end
+
+    force_par.template_k = max(1, round(double(force_par.template_k)));
+    force_par.template_k_min = max(1, round(double(force_par.template_k_min)));
+    force_par.template_sdnum = double(template_sdnum);
+end
+
+function [target_labels, target_best_dist, template_stats, force_used] = assign_spikes_waveclus_force( ...
+    template_spikes, template_labels, target_spikes, force_par)
+
+    template_spikes = double(template_spikes);
+    target_spikes = double(target_spikes);
     template_labels = double(template_labels(:));
+
     target_labels = zeros(size(target_spikes,1), 1);
     target_best_dist = inf(size(target_spikes,1), 1);
+    force_used = force_par;
 
     cids = unique(template_labels(template_labels > 0));
     template_stats = struct('cluster_id', {}, 'n_spikes', {});
+    for i = 1:numel(cids)
+        template_stats(i).cluster_id = cids(i);
+        template_stats(i).n_spikes = sum(template_labels == cids(i));
+    end
     if isempty(cids) || isempty(target_spikes)
         return;
     end
 
-    K = numel(cids);
-    D = inf(size(target_spikes,1), K);
-
-    for ki = 1:K
-        cid = cids(ki);
-        mask = template_labels == cid;
-        w = template_spikes(mask, :);
-        mu = mean(w, 1);
-        sd = std(w, 0, 1);
-        sd(sd < 1e-6) = 1e-6;
-
-        z = (target_spikes - mu) ./ sd;
-        D(:, ki) = sqrt(mean(z.^2, 2));
-
-        template_stats(ki).cluster_id = cid;
-        template_stats(ki).n_spikes = sum(mask);
+    in_mask = template_labels > 0;
+    if ~any(in_mask)
+        return;
     end
 
-    [target_best_dist, best_idx] = min(D, [], 2);
-    pass = target_best_dist <= threshold_sd;
-    target_labels(pass) = cids(best_idx(pass));
+    f_in_all = template_spikes;
+    f_out = target_spikes;
+
+    if strcmp(force_par.force_feature, 'wav')
+        if exist('wave_features', 'file') == 2
+            try
+                all_spk = [f_in_all; f_out];
+                all_feat = wave_features(all_spk, force_par);
+                n_in = size(f_in_all, 1);
+                f_in_all = double(all_feat(1:n_in, :));
+                f_out = double(all_feat((n_in+1):end, :));
+            catch MEwf
+                warning('wave_features failed (%s). Falling back to spike waveform forcing.', MEwf.message);
+                force_used.force_feature = 'spk';
+            end
+        else
+            warning('wave_features not found. Falling back to spike waveform forcing.');
+            force_used.force_feature = 'spk';
+        end
+    end
+
+    f_in = f_in_all(in_mask, :);
+    class_in = template_labels(in_mask)';
+    if isempty(f_in) || isempty(class_in)
+        return;
+    end
+
+    class_out = force_membership_wc_local(f_in, class_in, f_out, force_used);
+    target_labels = double(class_out(:));
+    target_best_dist = force_best_distance_sd_units(f_in, class_in, f_out, force_used);
+end
+
+function class_out = force_membership_wc_local(f_in, class_in, f_out, par)
+    nspk = size(f_out, 1);
+    class_out = zeros(1, nspk);
+    if isempty(f_in) || isempty(class_in) || nspk == 0
+        return;
+    end
+
+    switch lower(par.template_type)
+        case 'nn'
+            sdnum = par.template_sdnum;
+            k = par.template_k;
+            k_min = par.template_k_min;
+            sd = sqrt(sum(var(f_in, 1))) * ones(1, size(f_in, 1));
+            for i = 1:nspk
+                nn = nearest_neighbor_local(f_out(i,:), f_in, sdnum * sd, ...
+                    Inf * ones(size(f_in)), Inf, k);
+                if any(nn)
+                    winner = mode(class_in(nn));
+                    if nnz(class_in(nn) == winner) < k_min
+                        class_out(i) = 0;
+                    else
+                        class_out(i) = winner;
+                    end
+                else
+                    class_out(i) = 0;
+                end
+            end
+
+        case 'center'
+            [centers, sd] = build_templates_local(class_in, f_in);
+            sdnum = par.template_sdnum;
+            for i = 1:nspk
+                class_out(i) = nearest_neighbor_local(f_out(i,:), centers, sdnum * sd);
+            end
+
+        case 'ml'
+            [mu, inv_sigma] = fit_gaussian_local(f_in, class_in);
+            for i = 1:nspk
+                class_out(i) = ml_gaussian_local(f_out(i,:), mu, inv_sigma);
+            end
+
+        case 'mahal'
+            classes = unique(class_in);
+            mdistance = inf(numel(classes), nspk);
+            maxdist = zeros(1, numel(classes));
+            for ci = 1:numel(classes)
+                c = classes(ci);
+                fi = f_in(class_in == c, :);
+                if size(fi,1) < 2 || exist('mahal', 'file') ~= 2
+                    warning('mahal forcing unavailable for class %d; falling back to center forcing.', c);
+                    p2 = par;
+                    p2.template_type = 'center';
+                    class_out = force_membership_wc_local(f_in, class_in, f_out, p2);
+                    return;
+                end
+                mdistance(ci,:) = mahal(f_out, fi);
+                maxdist(ci) = sqrt(mean(mahal(fi, fi)));
+            end
+            sdnum = par.template_sdnum;
+            for i = 1:nspk
+                [d, winner] = min(mdistance(:, i));
+                if isfinite(d) && sqrt(d) < sdnum * maxdist(winner)
+                    class_out(i) = classes(winner);
+                end
+            end
+
+        otherwise
+            warning('Unknown template_type "%s"; falling back to center forcing.', par.template_type);
+            p2 = par;
+            p2.template_type = 'center';
+            class_out = force_membership_wc_local(f_in, class_in, f_out, p2);
+    end
+end
+
+function best_sd = force_best_distance_sd_units(f_in, class_in, f_out, par)
+    nspk = size(f_out, 1);
+    best_sd = inf(nspk, 1);
+    if isempty(f_in) || isempty(class_in) || nspk == 0
+        return;
+    end
+
+    switch lower(par.template_type)
+        case 'center'
+            [centers, sd] = build_templates_local(class_in, f_in);
+            sd = double(sd(:));
+            for i = 1:nspk
+                d = sqrt(sum((centers - f_out(i,:)).^2, 2));
+                z = inf(size(d));
+                ok = sd > 0 & isfinite(sd);
+                z(ok) = d(ok) ./ sd(ok);
+                if any(isfinite(z))
+                    best_sd(i) = min(z);
+                end
+            end
+
+        case 'nn'
+            sd = sqrt(sum(var(f_in, 1)));
+            if ~isfinite(sd) || sd <= 0
+                return;
+            end
+            for i = 1:nspk
+                d = sqrt(sum((f_in - f_out(i,:)).^2, 2));
+                best_sd(i) = min(d) / sd;
+            end
+
+        case 'mahal'
+            classes = unique(class_in);
+            mdistance = inf(numel(classes), nspk);
+            maxdist = zeros(1, numel(classes));
+            for ci = 1:numel(classes)
+                c = classes(ci);
+                fi = f_in(class_in == c, :);
+                if size(fi,1) < 2 || exist('mahal', 'file') ~= 2
+                    return;
+                end
+                mdistance(ci,:) = mahal(f_out, fi);
+                maxdist(ci) = sqrt(mean(mahal(fi, fi)));
+            end
+            for i = 1:nspk
+                [d, winner] = min(mdistance(:, i));
+                if isfinite(d) && maxdist(winner) > 0
+                    best_sd(i) = sqrt(d) / maxdist(winner);
+                end
+            end
+
+        case 'ml'
+            best_sd = nan(nspk, 1);
+    end
+end
+
+function index = nearest_neighbor_local(x, vectors, maxdist, varargin)
+    if isempty(vectors)
+        index = 0;
+        return;
+    end
+    distances = sqrt(sum((ones(size(vectors,1),1) * x - vectors).^2, 2)');
+    conforming = find(distances < maxdist);
+    if ~isempty(varargin)
+        pointdist = varargin{1};
+        if numel(varargin) > 1
+            pointlimit = varargin{2};
+        else
+            pointlimit = Inf;
+        end
+        pointwise_conforming = [];
+        for i = 1:size(vectors,1)
+            if sum(abs(x - vectors(i,:)) > pointdist(i,:)) < pointlimit
+                pointwise_conforming = [pointwise_conforming i]; %#ok<AGROW>
+            end
+        end
+        conforming = intersect(conforming, pointwise_conforming);
+    end
+    if isempty(conforming)
+        index = 0;
+    else
+        if numel(varargin) > 2
+            k = varargin{3};
+            [~, ii] = sort(distances(conforming));
+            ii = ii(1:min(numel(ii), k));
+        else
+            [~, ii] = min(distances(conforming));
+        end
+        index = conforming(ii);
+    end
+end
+
+function [templates, maxdist, pointdist] = build_templates_local(classes, features)
+    max_class = max(classes);
+    feature_dim = size(features, 2);
+    templates = zeros(max_class, feature_dim);
+    maxdist = zeros(1, max_class);
+    pointdist = zeros(max_class, feature_dim);
+    for i = 1:max_class
+        fi = features(classes == i, :);
+        if isempty(fi), continue; end
+        templates(i,:) = mean(fi, 1);
+        maxdist(i) = sqrt(sum(var(fi, 1)));
+        pointdist(i,:) = sqrt(var(fi, 1));
+    end
+end
+
+function [mu, inv_sigma] = fit_gaussian_local(x, class)
+    N = max(class);
+    mu = zeros(N, size(x,2));
+    inv_sigma = zeros(size(x,2), size(x,2), N);
+    for i = 1:N
+        xi = x(class == i, :);
+        if size(xi,1) < 2
+            inv_sigma(:,:,i) = eye(size(x,2));
+            if ~isempty(xi)
+                mu(i,:) = mean(xi, 1);
+            end
+        else
+            mu(i,:) = mean(xi, 1);
+            inv_sigma(:,:,i) = pinv(cov(xi));
+        end
+    end
+end
+
+function index = ml_gaussian_local(x, mu, inv_sigma)
+    N = size(mu,1);
+    if N == 0
+        index = 0;
+        return;
+    end
+    p = zeros(1, N);
+    for i = 1:N
+        q = (x - mu(i,:)) * inv_sigma(:,:,i) * (x - mu(i,:))';
+        p(i) = sqrt(max(det(inv_sigma(:,:,i)), 0)) * exp(-0.5 * q);
+    end
+    [~, index] = max(p);
+end
+
+function v = get_struct_field_or_default(S, f, default_v)
+    if isstruct(S) && isfield(S, f) && ~isempty(S.(f))
+        v = S.(f);
+    else
+        v = default_v;
+    end
 end
 
 function save_assignment_summary_png(ch, png_file, cc_before_labels, cc_after_clean_labels, ...
