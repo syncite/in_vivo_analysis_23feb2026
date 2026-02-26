@@ -26,20 +26,18 @@ What it does interactively:
 - asks you to pick `.plx` (raw) or master `.mat` (already filtered)
 - if `.plx`, runs extraction/filtering automatically
 - confirms detected filtered channel files and asks whether to proceed
-- asks template-generation strictness (with compare option)
-- asks assignment strictness (with compare option)
 - asks channel selection (default all; supports input like `1:4`)
 - runs clean-template generation (step 1)
 - displays generated PNGs
 - asks whether to refine in wave_clus GUI or proceed
 - runs reassignment of remaining clean + dirty spikes (step 2)
 - displays resulting PNGs
+- runs `analyse_peri_event` automatically at the end
 
-Compare behavior:
-- if you choose `4 (Compare)` for template strictness, it runs full pipeline passes at template levels `1, 2, 3`
-- if you choose `4 (Compare)` for assignment strictness, it runs full pipeline passes at assignment levels `1, 2, 3`
-- if both are `Compare`, it runs matched pairs: `(1,1)`, `(2,2)`, `(3,3)`
-- compare-run outputs are archived under `<plxname>_channels/strictness_compare_<timestamp>/`
+Fixed settings in `run_opto_sorting_pipeline`:
+- template generation uses the middle/default template settings
+- `min_clus = 20`
+- assignment threshold is `2.0 SD` for both clean-unlabeled and dirty spikes
 
 ## 1) Start MATLAB and set paths
 
@@ -119,12 +117,13 @@ By default, step 6 will:
 - save a step-2 PNG summary (`*_assignment_summary.png`)
 
 These defaults are hard-coded in the script:
+
+Note: `run_opto_sorting_pipeline` overrides assignment thresholds to `2.0 SD` for both clean and dirty spikes.
 - time reference: `index_ms+firstAD`
 - clean cluster-0 reassignment: ON
 - clean threshold: `2.5 SD`
 - dirty threshold: `2.5 SD`
 - assignment PNG output: ON
-- template strictness presets keep `min_clus = 20` for all levels
 
 ```matlab
 waveclus_opto_artifact_free(master, 'mode', 'assign');
@@ -141,6 +140,9 @@ wave_clus
 Open the same `channel_<N>_filtered_CAR.mat` files again and do final cleanup curation if needed.
 
 ## 8) Run downstream analysis scripts
+
+If you used `run_opto_sorting_pipeline`, `analyse_peri_event` is already run automatically.
+Use this section for manual workflows:
 
 ```matlab
 analyse_peri_event(master);
