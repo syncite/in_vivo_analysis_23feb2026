@@ -82,11 +82,10 @@ par.tempstep = 0.01;
 par.SWCycles = 100;
 par.KNearNeighb = 11;
 
-% Minimum cluster size. Default (60) is too aggressive for sparse neurons.
-% At 0.1 Hz over 45 min = ~270 spikes total. With Inf segment length,
-% all 270 are available for clustering. 30 is stricter and reduces small
-% borderline clusters.
-par.min_clus = 30;
+% Minimum cluster size. Keep fixed at 20 for all strictness presets in the
+% interactive pipeline, so strictness mainly changes detection and forcing
+% behavior rather than the minimum accepted cluster count.
+par.min_clus = 20;
 
 par.randomseed = 0;                  % clock-based random seed
 par.temp_plot = 'log';

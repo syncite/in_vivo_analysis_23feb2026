@@ -74,83 +74,125 @@ function run_opto_sorting_pipeline(varargin)
         return;
     end
 
-    template_mode = prompt_template_strictness();
-    assign_mode = prompt_assignment_strictness();
-
+    template_choice = prompt_template_strictness();
+    assign_choice = prompt_assignment_strictness();
     channels = prompt_channels(all_channels);
-    [par, template_label] = build_template_params(template_mode);
-    [clean_thr, dirty_thr, assign_label] = map_assignment_thresholds(assign_mode);
+    run_plan = build_run_plan(template_choice, assign_choice);
 
     fprintf('\nSelected channels: %s\n', mat2str(channels));
-    fprintf('Template strictness: %s\n', template_label);
-    fprintf('Assignment strictness: %s (clean thr=%.2f SD, dirty thr=%.2f SD)\n', ...
-        assign_label, clean_thr, dirty_thr);
-
-    fprintf('\n=== Step 1: Generate Clean Templates ===\n');
-    t_prepare_start = now;
-    waveclus_opto_artifact_free(master_mat, ...
-        'mode', 'prepare', ...
-        'channels', channels, ...
-        'par', par, ...
-        'time_reference_mode', 'index_ms+firstAD', ...
-        'assign_unlabeled_clean', true, ...
-        'clean_distance_threshold_sd', clean_thr, ...
-        'distance_threshold_sd', dirty_thr, ...
-        'save_assignment_png', true, ...
-        'debug', opts.debug);
-
-    fprintf('\nDisplaying PNGs generated in step 1...\n');
-    show_recent_pngs(channel_dir, t_prepare_start, 'Step 1 PNGs');
-
-    while true
-        resp = lower(strtrim(input([ ...
-            '\nAre you happy with all templates?\n' ...
-            '  y = proceed to assigning all spikes\n' ...
-            '  g = refine in wave_clus GUI first\n' ...
-            '  q = quit now\n' ...
-            'Choice [y/g/q]: '], 's')));
-        if isempty(resp), resp = 'g'; end
-
-        if strcmp(resp, 'y')
-            break;
-        elseif strcmp(resp, 'q')
-            fprintf('Stopped by user before assignment step.\n');
-            return;
-        elseif strcmp(resp, 'g')
-            print_gui_refine_instructions(channel_dir);
-            if exist('wave_clus', 'file') == 2
-                launch = ask_yes_no('Open wave_clus GUI now? [y/n]: ', true);
-                if launch
-                    wave_clus;
-                end
-            else
-                fprintf('wave_clus function not found on path. Open GUI manually after adding wave_clus path.\n');
-            end
-            input('After you refine and save in GUI, press Enter to continue...', 's');
-        else
-            fprintf('Invalid choice. Please type y, g, or q.\n');
+    if numel(run_plan) == 1
+        [~, template_label] = build_template_params(run_plan(1).template_mode);
+        [clean_thr, dirty_thr, assign_label] = map_assignment_thresholds(run_plan(1).assign_mode);
+        fprintf('Template strictness: %s\n', template_label);
+        fprintf('Assignment strictness: %s (clean thr=%.2f SD, dirty thr=%.2f SD)\n', ...
+            assign_label, clean_thr, dirty_thr);
+        compare_root = '';
+    else
+        compare_root = fullfile(channel_dir, ['strictness_compare_' datestr(now, 'yyyymmdd_HHMMSS')]);
+        if ~exist(compare_root, 'dir')
+            mkdir(compare_root);
         end
+        fprintf('Compare mode: running %d full pipeline passes.\n', numel(run_plan));
+        for r = 1:numel(run_plan)
+            [~, template_label] = build_template_params(run_plan(r).template_mode);
+            [clean_thr, dirty_thr, assign_label] = map_assignment_thresholds(run_plan(r).assign_mode);
+            fprintf('  Run %d -> template=%s | assign=%s (clean %.2f SD, dirty %.2f SD)\n', ...
+                r, template_label, assign_label, clean_thr, dirty_thr);
+        end
+        fprintf('Compare outputs folder: %s\n', compare_root);
+        fprintf('Compare mode runs unattended (no GUI pause between runs).\n');
     end
 
-    fprintf('\n=== Step 2: Assign Remaining Clean + Dirty Spikes ===\n');
-    t_assign_start = now;
-    waveclus_opto_artifact_free(master_mat, ...
-        'mode', 'assign', ...
-        'channels', channels, ...
-        'time_reference_mode', 'index_ms+firstAD', ...
-        'assign_unlabeled_clean', true, ...
-        'clean_distance_threshold_sd', clean_thr, ...
-        'distance_threshold_sd', dirty_thr, ...
-        'save_assignment_png', true, ...
-        'overwrite_main_times', true, ...
-        'debug', opts.debug);
+    for r = 1:numel(run_plan)
+        run_start = now;
+        [par, template_label] = build_template_params(run_plan(r).template_mode);
+        [clean_thr, dirty_thr, assign_label] = map_assignment_thresholds(run_plan(r).assign_mode);
+        run_tag = sprintf('run_%02d_template_%s_assign_%s', r, lower(template_label), lower(assign_label));
 
-    fprintf('\nDisplaying PNGs generated in step 2...\n');
-    show_recent_pngs(channel_dir, t_assign_start, 'Step 2 PNGs');
+        fprintf('\n============================================================\n');
+        fprintf('Pipeline run %d/%d\n', r, numel(run_plan));
+        fprintf('Template strictness: %s | Assignment strictness: %s\n', template_label, assign_label);
+        fprintf('============================================================\n');
+
+        fprintf('\n=== Step 1: Generate Clean Templates ===\n');
+        t_prepare_start = now;
+        waveclus_opto_artifact_free(master_mat, ...
+            'mode', 'prepare', ...
+            'channels', channels, ...
+            'par', par, ...
+            'time_reference_mode', 'index_ms+firstAD', ...
+            'assign_unlabeled_clean', true, ...
+            'clean_distance_threshold_sd', clean_thr, ...
+            'distance_threshold_sd', dirty_thr, ...
+            'save_assignment_png', true, ...
+            'debug', opts.debug);
+
+        fprintf('\nDisplaying PNGs generated in step 1...\n');
+        show_recent_pngs(channel_dir, t_prepare_start, sprintf('Step 1 PNGs (run %d)', r));
+
+        if numel(run_plan) == 1
+            while true
+                resp = lower(strtrim(input([ ...
+                    '\nAre you happy with all templates?\n' ...
+                    '  y = proceed to assigning all spikes\n' ...
+                    '  g = refine in wave_clus GUI first\n' ...
+                    '  q = quit now\n' ...
+                    'Choice [y/g/q]: '], 's')));
+                if isempty(resp), resp = 'g'; end
+
+                if strcmp(resp, 'y')
+                    break;
+                elseif strcmp(resp, 'q')
+                    fprintf('Stopped by user before assignment step.\n');
+                    return;
+                elseif strcmp(resp, 'g')
+                    print_gui_refine_instructions(channel_dir);
+                    if exist('wave_clus', 'file') == 2
+                        launch = ask_yes_no('Open wave_clus GUI now? [y/n]: ', true);
+                        if launch
+                            wave_clus;
+                        end
+                    else
+                        fprintf('wave_clus function not found on path. Open GUI manually after adding wave_clus path.\n');
+                    end
+                    input('After you refine and save in GUI, press Enter to continue...', 's');
+                else
+                    fprintf('Invalid choice. Please type y, g, or q.\n');
+                end
+            end
+        else
+            fprintf('Compare mode: proceeding directly to assignment for this run.\n');
+        end
+
+        fprintf('\n=== Step 2: Assign Remaining Clean + Dirty Spikes ===\n');
+        t_assign_start = now;
+        waveclus_opto_artifact_free(master_mat, ...
+            'mode', 'assign', ...
+            'channels', channels, ...
+            'time_reference_mode', 'index_ms+firstAD', ...
+            'assign_unlabeled_clean', true, ...
+            'clean_distance_threshold_sd', clean_thr, ...
+            'distance_threshold_sd', dirty_thr, ...
+            'save_assignment_png', true, ...
+            'overwrite_main_times', true, ...
+            'debug', opts.debug);
+
+        fprintf('\nDisplaying PNGs generated in step 2...\n');
+        show_recent_pngs(channel_dir, t_assign_start, sprintf('Step 2 PNGs (run %d)', r));
+
+        if numel(run_plan) > 1
+            run_out_dir = fullfile(compare_root, run_tag);
+            archive_recent_outputs(channel_dir, run_start, run_out_dir);
+            fprintf('Saved run outputs to: %s\n', run_out_dir);
+        end
+    end
 
     fprintf('\nPipeline complete.\n');
     fprintf('Master: %s\n', master_mat);
     fprintf('Channel dir: %s\n', channel_dir);
+    if numel(run_plan) > 1
+        fprintf('Compare outputs: %s\n', compare_root);
+    end
 end
 
 function master_mat = run_extract_and_get_master(plx_file, opts)
@@ -250,50 +292,32 @@ function channels = prompt_channels(all_channels)
     end
 end
 
-function mode = prompt_template_strictness()
+function choice = prompt_template_strictness()
     fprintf('\nTemplate-generation strictness (default = 2):\n');
-    fprintf('  1) Lenient  : stdmin=4,   min_clus=20, force_auto=true,  template_sdnum=3.0\n');
-    fprintf('  2) Default  : stdmin=4.5, min_clus=30, force_auto=false, template_sdnum=2.5\n');
-    fprintf('  3) Strict   : stdmin=5.0, min_clus=40, force_auto=false, template_sdnum=2.0\n');
-    fprintf('  4) Compare  : show side-by-side summary, then choose 1/2/3\n');
+    fprintf('  1) Lenient  : stdmin=4.0, min_clus=20, force_auto=true,  template_sdnum=3.0\n');
+    fprintf('  2) Default  : stdmin=4.5, min_clus=20, force_auto=false, template_sdnum=2.5\n');
+    fprintf('  3) Strict   : stdmin=5.0, min_clus=20, force_auto=false, template_sdnum=2.0\n');
+    fprintf('  4) Compare  : run full pipeline on 1/2/3 template levels\n');
 
     raw = strtrim(input('Choose [1/2/3/4] (Enter=2): ', 's'));
     if isempty(raw), raw = '2'; end
-    if strcmp(raw, '4')
-        fprintf('\nComparison:\n');
-        fprintf('  Lenient -> finds more events, more permissive clustering.\n');
-        fprintf('  Default -> balanced selectivity (recommended).\n');
-        fprintf('  Strict  -> fewer events, more conservative clusters.\n');
-        raw = strtrim(input('After compare, choose [1/2/3] (Enter=2): ', 's'));
-        if isempty(raw), raw = '2'; end
-    end
-
-    mode = str2double(raw);
-    if ~ismember(mode, [1 2 3])
+    choice = str2double(raw);
+    if ~ismember(choice, [1 2 3 4])
         error('Invalid template strictness choice.');
     end
 end
 
-function mode = prompt_assignment_strictness()
+function choice = prompt_assignment_strictness()
     fprintf('\nAssignment strictness (default = 2):\n');
     fprintf('  1) Lenient  : clean/dirty threshold = 3.0 SD\n');
     fprintf('  2) Default  : clean/dirty threshold = 2.5 SD\n');
     fprintf('  3) Strict   : clean/dirty threshold = 2.0 SD\n');
-    fprintf('  4) Compare  : show side-by-side summary, then choose 1/2/3\n');
+    fprintf('  4) Compare  : run full pipeline on 1/2/3 assignment levels\n');
 
     raw = strtrim(input('Choose [1/2/3/4] (Enter=2): ', 's'));
     if isempty(raw), raw = '2'; end
-    if strcmp(raw, '4')
-        fprintf('\nComparison:\n');
-        fprintf('  Lenient -> more spikes get assigned to templates.\n');
-        fprintf('  Default -> balanced assignment selectivity (recommended).\n');
-        fprintf('  Strict  -> fewer ambiguous spikes are assigned.\n');
-        raw = strtrim(input('After compare, choose [1/2/3] (Enter=2): ', 's'));
-        if isempty(raw), raw = '2'; end
-    end
-
-    mode = str2double(raw);
-    if ~ismember(mode, [1 2 3])
+    choice = str2double(raw);
+    if ~ismember(choice, [1 2 3 4])
         error('Invalid assignment strictness choice.');
     end
 end
@@ -307,10 +331,12 @@ function [par, label] = build_template_params(mode)
         error('No set_parameters_custom or set_parameters found on path.');
     end
 
+    % Keep min_clus fixed for all strictness levels.
+    par.min_clus = 20;
+
     switch mode
         case 1
             par.stdmin = 4.0;
-            par.min_clus = 20;
             par.force_auto = true;
             par.template_sdnum = 3.0;
             label = 'Lenient';
@@ -319,7 +345,6 @@ function [par, label] = build_template_params(mode)
             label = 'Default';
         case 3
             par.stdmin = 5.0;
-            par.min_clus = max(40, par.min_clus);
             par.force_auto = false;
             par.template_sdnum = 2.0;
             label = 'Strict';
@@ -345,6 +370,28 @@ function [clean_thr, dirty_thr, label] = map_assignment_thresholds(mode)
         otherwise
             error('Unknown assignment strictness mode.');
     end
+end
+
+function run_plan = build_run_plan(template_choice, assign_choice)
+    if template_choice == 4 && assign_choice == 4
+        % Compare both dimensions as matched levels: (1,1), (2,2), (3,3).
+        run_plan = struct('template_mode', {1, 2, 3}, 'assign_mode', {1, 2, 3});
+        return;
+    end
+
+    if template_choice == 4
+        run_plan = struct('template_mode', {1, 2, 3}, ...
+            'assign_mode', {assign_choice, assign_choice, assign_choice});
+        return;
+    end
+
+    if assign_choice == 4
+        run_plan = struct('template_mode', {template_choice, template_choice, template_choice}, ...
+            'assign_mode', {1, 2, 3});
+        return;
+    end
+
+    run_plan = struct('template_mode', template_choice, 'assign_mode', assign_choice);
 end
 
 function tf = ask_yes_no(prompt_text, default_yes)
@@ -402,5 +449,42 @@ function show_png_file(png_file)
         catch
             fprintf('  Could not display: %s\n', png_file);
         end
+    end
+end
+
+function archive_recent_outputs(channel_dir, since_datenum, out_dir)
+    if ~exist(out_dir, 'dir')
+        mkdir(out_dir);
+    end
+
+    pats = {'**/*.png', '**/times*.mat', '**/*_dirty_assignment.mat'};
+    files = [];
+    for i = 1:numel(pats)
+        d = dir(fullfile(channel_dir, pats{i}));
+        if ~isempty(d)
+            files = [files; d(~[d.isdir])]; %#ok<AGROW>
+        end
+    end
+    if isempty(files)
+        fprintf('No files found to archive for this run.\n');
+        return;
+    end
+
+    dt_eps = 2 / 86400; % 2 seconds tolerance
+    files = files([files.datenum] >= (since_datenum - dt_eps));
+    if isempty(files)
+        fprintf('No new files detected to archive for this run.\n');
+        return;
+    end
+
+    for i = 1:numel(files)
+        src = fullfile(files(i).folder, files(i).name);
+        rel = strrep(src, [channel_dir filesep], '');
+        dst = fullfile(out_dir, rel);
+        dst_dir = fileparts(dst);
+        if ~exist(dst_dir, 'dir')
+            mkdir(dst_dir);
+        end
+        copyfile(src, dst);
     end
 end

@@ -35,6 +35,12 @@ What it does interactively:
 - runs reassignment of remaining clean + dirty spikes (step 2)
 - displays resulting PNGs
 
+Compare behavior:
+- if you choose `4 (Compare)` for template strictness, it runs full pipeline passes at template levels `1, 2, 3`
+- if you choose `4 (Compare)` for assignment strictness, it runs full pipeline passes at assignment levels `1, 2, 3`
+- if both are `Compare`, it runs matched pairs: `(1,1)`, `(2,2)`, `(3,3)`
+- compare-run outputs are archived under `<plxname>_channels/strictness_compare_<timestamp>/`
+
 ## 1) Start MATLAB and set paths
 
 ```matlab
@@ -118,6 +124,7 @@ These defaults are hard-coded in the script:
 - clean threshold: `2.5 SD`
 - dirty threshold: `2.5 SD`
 - assignment PNG output: ON
+- template strictness presets keep `min_clus = 20` for all levels
 
 ```matlab
 waveclus_opto_artifact_free(master, 'mode', 'assign');
