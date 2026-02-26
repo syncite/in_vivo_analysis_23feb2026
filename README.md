@@ -10,8 +10,30 @@ This is a step-by-step protocol for running your full analysis pipeline, includi
 Scripts used:
 - `extract_and_filter.m`
 - `waveclus_opto_artifact_free.m`
+- `run_opto_sorting_pipeline.m` (new one-command interactive entry point)
 - `analyse_peri_event.m`
 - `visualise_waveform.m`
+
+## Quick Start (Single Command)
+
+If you want one guided command in MATLAB:
+
+```matlab
+run_opto_sorting_pipeline
+```
+
+What it does interactively:
+- asks you to pick `.plx` (raw) or master `.mat` (already filtered)
+- if `.plx`, runs extraction/filtering automatically
+- confirms detected filtered channel files and asks whether to proceed
+- asks template-generation strictness (with compare option)
+- asks assignment strictness (with compare option)
+- asks channel selection (default all; supports input like `1:4`)
+- runs clean-template generation (step 1)
+- displays generated PNGs
+- asks whether to refine in wave_clus GUI or proceed
+- runs reassignment of remaining clean + dirty spikes (step 2)
+- displays resulting PNGs
 
 ## 1) Start MATLAB and set paths
 

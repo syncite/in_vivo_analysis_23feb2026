@@ -30,6 +30,11 @@ function waveclus_opto_artifact_free(master_mat_file, varargin)
 %   'led_tags'              : event tags considered LED trials [32385]
 %   'led_duration_s'        : scalar or per-tag durations (s)   1.0
 %   'post_led_buffer_s'     : fixed post-offset exclusion (s)   0.1
+%   'time_reference_mode'   : optional override for time mode   [index_ms+firstAD]
+%   'assign_unlabeled_clean': optional override                 [true]
+%   'clean_distance_threshold_sd': optional override            [2.5]
+%   'distance_threshold_sd' : optional override                 [2.5]
+%   'save_assignment_png'   : optional override                 [true]
 %   'overwrite_main_times'  : in assign mode, replace times_*.mat [true]
 %   'run_clustering'        : in prepare mode, run Do_clustering [true]
 %   'debug'                 : print Get_spikes path diagnostics [false]
@@ -57,6 +62,13 @@ function waveclus_opto_artifact_free(master_mat_file, varargin)
     addParameter(p, 'led_tags', 32385, @isnumeric);
     addParameter(p, 'led_duration_s', 1.0, @(x) isnumeric(x) && all(x > 0));
     addParameter(p, 'post_led_buffer_s', 0.1, @(x) isnumeric(x) && isscalar(x) && x >= 0);
+    addParameter(p, 'time_reference_mode', '', @(x) ischar(x) || isstring(x));
+    addParameter(p, 'assign_unlabeled_clean', [], @(x) isempty(x) || islogical(x));
+    addParameter(p, 'clean_distance_threshold_sd', [], ...
+        @(x) isempty(x) || (isnumeric(x) && isscalar(x) && x > 0));
+    addParameter(p, 'distance_threshold_sd', [], ...
+        @(x) isempty(x) || (isnumeric(x) && isscalar(x) && x > 0));
+    addParameter(p, 'save_assignment_png', [], @(x) isempty(x) || islogical(x));
     addParameter(p, 'overwrite_main_times', true, @islogical);
     addParameter(p, 'run_clustering', true, @islogical);
     addParameter(p, 'debug', false, @islogical);
@@ -68,12 +80,23 @@ function waveclus_opto_artifact_free(master_mat_file, varargin)
         error('mode must be ''prepare'' or ''assign''.');
     end
 
-    % Fixed settings for reproducible two-pass workflow.
-    opts.time_reference_mode = normalize_time_reference_mode('index_ms+firstAD');
-    opts.assign_unlabeled_clean = true;
-    opts.clean_distance_threshold_sd = 2.5;
-    opts.distance_threshold_sd = 2.5;
-    opts.save_assignment_png = true;
+    % Defaults for reproducible two-pass workflow (can be overridden).
+    if isempty(opts.time_reference_mode)
+        opts.time_reference_mode = 'index_ms+firstAD';
+    end
+    opts.time_reference_mode = normalize_time_reference_mode(opts.time_reference_mode);
+    if isempty(opts.assign_unlabeled_clean)
+        opts.assign_unlabeled_clean = true;
+    end
+    if isempty(opts.distance_threshold_sd)
+        opts.distance_threshold_sd = 2.5;
+    end
+    if isempty(opts.clean_distance_threshold_sd)
+        opts.clean_distance_threshold_sd = opts.distance_threshold_sd;
+    end
+    if isempty(opts.save_assignment_png)
+        opts.save_assignment_png = true;
+    end
 
     if isscalar(opts.led_duration_s)
         opts.led_duration_s = repmat(opts.led_duration_s, size(opts.led_tags));
